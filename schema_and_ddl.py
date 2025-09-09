@@ -5,9 +5,14 @@ def map_mysql_to_ch_type(column):
     """
     column: dict from information_schema (COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, ...)
     """
-    mysql_type = (column.get("COLUMN_TYPE") or "").lower()
-    data_type = (column.get("DATA_TYPE") or "").lower()
-    nullable = (column.get("IS_NULLABLE") == "YES")
+    def to_str(val):
+        if isinstance(val, (bytes, bytearray)):
+            return val.decode("utf-8")
+        return str(val) if val is not None else ""
+
+    mysql_type = to_str(column.get("COLUMN_TYPE")).lower()
+    data_type = to_str(column.get("DATA_TYPE")).lower()
+    nullable = (to_str(column.get("IS_NULLABLE")).upper() == "YES")
 
     def wrap(t):
         return f"Nullable({t})" if nullable else t
