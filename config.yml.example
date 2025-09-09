@@ -1,0 +1,31 @@
+mysql:
+  host: host.docker.internal
+  port: 3306
+  user: repluser
+  password: password
+  database: source_db
+  include_tables: [
+    "users",
+    "orders",
+    "transactions",
+  ]  # empty = all
+  exclude_tables: []
+
+clickhouse:
+  host: 127.0.0.1
+  port: 9000
+  user: chuser
+  password: "root"
+  database: target_db
+
+migration:
+  batch_rows: 5000
+  ddl_engine: "ReplacingMergeTree"
+  low_cardinality_strings: true
+  workers: 4   # number of parallel table workers (default 4)
+
+# Where migres writes binlog checkpoint for Transferia
+checkpoint_file: /app/data/binlog_checkpoint.json
+
+# Where migres persists its resumable state
+state_file: /app/data/state.json
