@@ -67,4 +67,7 @@ It is designed for **snapshot-only mode** (no CDC yet), supporting large dataset
 
 ## Running
 
-### 1. Configure connections in config.yml
+### 0. Make sure `binlog_format=ROW`, `binlog_row_image=FULL` on MySQL/MariaDB
+### 1. Configure connections in `config.yml`
+### 2. Set include or exclude tables, or leave them empty
+### 3. Run with docker compose
