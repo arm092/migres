@@ -27,6 +27,14 @@ class CHClient:
             cfg["host"], cfg.get("port", 9000), self.db
         )
 
+    @staticmethod
+    def _escape_ident(name: str) -> str:
+        if not isinstance(name, str):
+            raise ValueError("Identifier must be a string")
+        # ClickHouse uses backticks for identifiers; double embedded backticks
+        safe = name.replace("`", "``")
+        return f"`{safe}`"
+
     def execute(self, sql, params=None):
         log.debug("CH SQL: %s", sql)
         return self.client.execute(sql, params or None)
@@ -38,10 +46,16 @@ class CHClient:
         """
         if not rows:
             return
-        cols = ",".join([f"`{c}`" for c in columns])
-        sql = f"INSERT INTO `{self.db}`.`{table}` ({cols}) VALUES"
+        cols = ",".join([self._escape_ident(c) for c in columns])
+        sql = f"INSERT INTO {self._escape_ident(self.db)}.{self._escape_ident(table)} ({cols}) VALUES"
         try:
             self.client.execute(sql, rows)
         except Exception:
             log.exception("ClickHouse insert failed for table %s", table)
             raise
+
+    def close(self):
+        try:
+            self.client.disconnect()
+        except Exception:
+            pass

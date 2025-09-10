@@ -22,6 +22,11 @@ def _process_table_worker(table, cfg, state: StateJson):
     # Per-thread clients
     mysql = MySQLClient(mysql_cfg)
     cn = mysql.connect()
+    # Ensure consistent snapshot for this worker connection
+    try:
+        mysql.start_repeatable_snapshot()
+    except Exception:
+        log.warning("Failed to start repeatable snapshot; proceeding with default transaction")
     ch = CHClient(ch_cfg)
 
     try:
@@ -78,8 +83,10 @@ def _process_table_worker(table, cfg, state: StateJson):
         else:
             log.info("Worker: using offset pagination for table %s", table)
             offset = state.get_table(table).get("rows_processed", 0)
+            # try to use deterministic order: prefer primary key columns, else 'id' if present
+            order_cols = pk_cols if pk_cols else (["id"] if "id" in mysql_cols else None)
             while True:
-                rows = mysql.fetch_stream_with_offset(table, insert_cols[:-2], offset, batch)
+                rows = mysql.fetch_stream_with_offset(table, insert_cols[:-2], offset, batch, order_by_columns=order_cols)
                 if not rows:
                     break
                 out_rows = []
@@ -102,6 +109,10 @@ def _process_table_worker(table, cfg, state: StateJson):
         except Exception:
             pass
         mysql.close()
+        try:
+            ch.close()
+        except Exception:
+            pass
 
 def run_snapshot(cfg):
     mysql_cfg = cfg["mysql"]
@@ -126,6 +137,9 @@ def run_snapshot(cfg):
         file, pos = master_status
         state.set_binlog(file, pos)
         try:
+            # ensure directory exists
+            import os
+            os.makedirs(os.path.dirname(checkpoint_file) or ".", exist_ok=True)
             with open(checkpoint_file, "w", encoding="utf-8") as f:
                 import json
                 json.dump({"binlog_file": file, "binlog_pos": pos}, f, indent=2)

@@ -1,5 +1,6 @@
 import mysql.connector
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,19 @@ class MySQLClient:
         if not row:
             return None
         return row[0], int(row[1])
+
+    @staticmethod
+    def _escape_ident(name: str) -> str:
+        """
+        Escape MySQL identifier by doubling backticks and wrapping with backticks.
+        Additionally, enforce a conservative validation to reduce injection risk.
+        """
+        if not isinstance(name, str):
+            raise ValueError("Identifier must be a string")
+        # Basic allowlist: letters, digits, underscore, dollar, and backtick (escaped)
+        # Still escape backticks to be safe
+        safe = name.replace("`", "``")
+        return f"`{safe}`"
 
     def start_repeatable_snapshot(self):
         try:
@@ -99,21 +113,30 @@ class MySQLClient:
 
     def fetch_rows_by_pk(self, table, columns, pk_col, last_pk, batch):
         cur = self.cn.cursor()
-        cols_sql = ", ".join([f"`{c}`" for c in columns])
+        cols_sql = ", ".join([self._escape_ident(c) for c in columns])
+        db_sql = self._escape_ident(self.cfg['database'])
+        tbl_sql = self._escape_ident(table)
+        pk_sql = self._escape_ident(pk_col)
         if last_pk is None:
-            sql = f"SELECT {cols_sql} FROM `{self.cfg['database']}`.`{table}` ORDER BY `{pk_col}` ASC LIMIT %s"
+            sql = f"SELECT {cols_sql} FROM {db_sql}.{tbl_sql} ORDER BY {pk_sql} ASC LIMIT %s"
             cur.execute(sql, (batch,))
         else:
-            sql = f"SELECT {cols_sql} FROM `{self.cfg['database']}`.`{table}` WHERE `{pk_col}` > %s ORDER BY `{pk_col}` ASC LIMIT %s"
+            sql = f"SELECT {cols_sql} FROM {db_sql}.{tbl_sql} WHERE {pk_sql} > %s ORDER BY {pk_sql} ASC LIMIT %s"
             cur.execute(sql, (last_pk, batch))
         rows = cur.fetchall()
         cur.close()
         return rows
 
-    def fetch_stream_with_offset(self, table, columns, offset, batch):
+    def fetch_stream_with_offset(self, table, columns, offset, batch, order_by_columns=None):
         cur = self.cn.cursor()
-        cols_sql = ", ".join([f"`{c}`" for c in columns])
-        sql = f"SELECT {cols_sql} FROM `{self.cfg['database']}`.`{table}` LIMIT %s OFFSET %s"
+        cols_sql = ", ".join([self._escape_ident(c) for c in columns])
+        db_sql = self._escape_ident(self.cfg['database'])
+        tbl_sql = self._escape_ident(table)
+        if order_by_columns:
+            order_sql = ", ".join([self._escape_ident(c) for c in order_by_columns])
+            sql = f"SELECT {cols_sql} FROM {db_sql}.{tbl_sql} ORDER BY {order_sql} LIMIT %s OFFSET %s"
+        else:
+            sql = f"SELECT {cols_sql} FROM {db_sql}.{tbl_sql} LIMIT %s OFFSET %s"
         cur.execute(sql, (batch, offset))
         rows = cur.fetchall()
         cur.close()

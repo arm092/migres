@@ -76,6 +76,9 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
         name = col["COLUMN_NAME"]
         mysql_col_names.append(name)
         ch_type = map_mysql_to_ch_type(col)
+        # Optionally wrap strings with LowCardinality
+        if low and ch_type.endswith("String") and not ch_type.startswith("LowCardinality("):
+            ch_type = ch_type.replace("Nullable(String)", "Nullable(LowCardinality(String))") if ch_type.startswith("Nullable(") else f"LowCardinality({ch_type})"
         col_defs.append(f"`{name}` {ch_type}")
 
     # Add transfer columns (insertable)
@@ -87,9 +90,9 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
 
     # If there is no primary key we will add a synthesized materialized PK __migres_pk
     if not pk_columns:
-        # build concat of toString(col1),'|',toString(col2) ...
-        parts = [f"toString(`{c}`)" for c in mysql_col_names]
-        concat_expr = " || '|' || ".join(parts) if parts else "''"
+        # build concat of toString(col1),'|',toString(col2) ... using ClickHouse concat()
+        parts = ", ".join([f"toString(`{c}`)" for c in mysql_col_names])
+        concat_expr = f"concat({parts})" if parts else "''"
         # materialized cityHash64(concat(...))
         col_defs.insert(0, f"`__migres_pk` UInt64 MATERIALIZED cityHash64({concat_expr})")
         synthesized = "__migres_pk"
