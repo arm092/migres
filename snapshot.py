@@ -1,7 +1,6 @@
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from mysql_client import MySQLClient
 from clickhouse_client import CHClient
 from schema_and_ddl import build_table_ddl
@@ -22,7 +21,7 @@ def _process_table_worker(table, cfg, state: StateJson):
     # Per-thread clients
     mysql = MySQLClient(mysql_cfg)
     cn = mysql.connect()
-    ch = CHClient(ch_cfg)
+    ch = CHClient(ch_cfg, mig_cfg)
 
     try:
         # If not in progress, mark as in_progress
@@ -72,7 +71,9 @@ def _process_table_worker(table, cfg, state: StateJson):
                     last_pk_value = last_row[pk_index]
                 except ValueError:
                     last_pk_value = None
+                # Persist and advance in-memory cursor to avoid re-reading same batch
                 state.set_table_last_pk(table, last_pk_value)
+                last_pk = last_pk_value
                 state.incr_table_rows(table, len(out_rows))
                 log.info("Worker: table %s inserted %d rows, last_pk=%s", table, len(out_rows), str(last_pk_value))
         else:
@@ -105,10 +106,8 @@ def _process_table_worker(table, cfg, state: StateJson):
 
 def run_snapshot(cfg):
     mysql_cfg = cfg["mysql"]
-    ch_cfg = cfg["clickhouse"]
     mig_cfg = cfg.get("migration", {})
     workers = int(mig_cfg.get("workers", 4))
-    batch = int(mig_cfg.get("batch_rows", 5000))
     checkpoint_file = cfg.get("checkpoint_file")
     state_file = cfg.get("state_file")
 

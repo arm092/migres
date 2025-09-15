@@ -2,3 +2,4 @@
 data
 config.yml
 .idea
+__pycache__

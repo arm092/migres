@@ -5,6 +5,7 @@ import sys
 from config import load_config
 from logger import setup_logging
 from snapshot import run_snapshot
+from cdc import run_cdc
 
 def main():
     ap = argparse.ArgumentParser(prog="migres")
@@ -14,13 +15,38 @@ def main():
     cfg = load_config(args.config)
     setup_logging()
 
-    logging.info("Starting migres (snapshot-only)...")
-    try:
-        run_snapshot(cfg)
-    except Exception as e:
-        logging.exception("migres failed:")
-        sys.exit(2)
-    logging.info("migres finished successfully.")
+    mode = (cfg.get("migration", {}).get("mode") or "snapshot").lower()
+    if mode == "snapshot":
+        logging.info("Starting migres (snapshot) mode...")
+        try:
+            run_snapshot(cfg)
+        except Exception:
+            logging.exception("Snapshot failed:")
+            sys.exit(2)
+        logging.info("Snapshot finished successfully.")
+    elif mode == "cdc":
+        logging.info("Starting migres (CDC) mode...")
+        try:
+            # ptionally, run a snapshot first to build a complete baseline
+            cdc_cfg = (cfg.get("migration", {}).get("cdc", {}) or {})
+            snapshot_before = bool(cdc_cfg.get("snapshot_before", True))
+            if snapshot_before:
+                logging.info("CDC: running initial snapshot before starting binlog streaming...")
+                try:
+                    run_snapshot(cfg)
+                except Exception:
+                    logging.exception("The Initial snapshot failed before the CDC started:")
+                    raise
+                logging.info("CDC: initial snapshot completed, starting binlog streaming...")
+
+            run_cdc(cfg)
+        except Exception:
+            logging.exception("CDC failed:")
+            sys.exit(3)
+        logging.info("CDC terminated.")
+    else:
+        logging.error("Unknown migration.mode: %s", mode)
+        sys.exit(4)
     return 0
 
 if __name__ == "__main__":

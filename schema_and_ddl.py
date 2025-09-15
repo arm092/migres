@@ -1,9 +1,10 @@
 import logging
 log = logging.getLogger(__name__)
 
-def map_mysql_to_ch_type(column):
+def map_mysql_to_ch_type(column, mig_cfg=None):
     """
     column: dict from information_schema (COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, ...)
+    mig_cfg: migration config dict for timezone settings
     """
     def to_str(val):
         if isinstance(val, (bytes, bytearray)):
@@ -43,8 +44,12 @@ def map_mysql_to_ch_type(column):
     if data_type == "date":
         return wrap("Date")
     if data_type in ("datetime", "timestamp"):
-        # using DateTime; could be DateTime64(3) for ms precision
-        return wrap("DateTime")
+        # Use DateTime64 with timezone support for proper analytical queries
+        if mig_cfg and mig_cfg.get("clickhouse_timezone"):
+            timezone = mig_cfg["clickhouse_timezone"]
+            return wrap(f"DateTime64(3, '{timezone}')")
+        else:
+            return wrap("DateTime64(3)")
 
     if data_type == "time":
         return wrap("String")
@@ -57,6 +62,28 @@ def map_mysql_to_ch_type(column):
 
     # fallback
     return wrap("String")
+
+
+def _default_expr_for_column(col, ch_type):
+    # Map MySQL COLUMN_DEFAULT to ClickHouse DEFAULT expression when feasible.
+    default_val = col.get("COLUMN_DEFAULT")
+    if default_val is None:
+        return None
+    # For NULL defaults, ClickHouse default is implicit for Nullable types.
+    # For numeric and strings, we can use a literal.
+    dt = str(col.get("DATA_TYPE") or "").lower()
+    if dt in ("tinyint","smallint","mediumint","int","integer","bigint","float","double","real","decimal","numeric"):
+        return str(default_val)
+    if dt in ("date","datetime","timestamp"):
+        # For DateTime64, use parseDateTimeBestEffort to handle various formats
+        if "DateTime64" in ch_type:
+            return f"parseDateTimeBestEffort('{str(default_val)}')"
+        # For Date/DateTime types, use toDate/parseDateTimeBestEffort
+        return f"toDateTime('{str(default_val)}')" if "DateTime" in ch_type else f"toDate('{str(default_val)}')"
+    # Treat others as strings
+    # Ensure single quotes escaped
+    s = str(default_val).replace("'", "\\'")
+    return f"'{s}'"
 
 
 def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
@@ -75,8 +102,12 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
     for col in columns_meta:
         name = col["COLUMN_NAME"]
         mysql_col_names.append(name)
-        ch_type = map_mysql_to_ch_type(col)
-        col_defs.append(f"`{name}` {ch_type}")
+        ch_type = map_mysql_to_ch_type(col, mig_cfg)
+        default_expr = _default_expr_for_column(col, ch_type)
+        if default_expr is not None:
+            col_defs.append(f"`{name}` {ch_type} DEFAULT {default_expr}")
+        else:
+            col_defs.append(f"`{name}` {ch_type}")
 
     # Add transfer columns (insertable)
     col_defs.append("`__data_transfer_commit_time` UInt64")
@@ -94,26 +125,61 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
         col_defs.insert(0, f"`__migres_pk` UInt64 MATERIALIZED cityHash64({concat_expr})")
         synthesized = "__migres_pk"
 
-    # decide order_by: prefer 'id' column if exists, else primary key, else synthesized
-    order_by_cols = []
+    # decide ORDER BY key columns (sorting key)
+    # For ReplacingMergeTree(version), ORDER BY must NOT include the version column;
+    # it must be the natural primary key so replacements collapse correctly.
     if "id" in mysql_col_names:
-        order_by_cols = ["id", "__data_transfer_commit_time"]
+        key_cols = ["id"]
     elif pk_columns:
-        order_by_cols = pk_columns + ["__data_transfer_commit_time"]
+        key_cols = list(pk_columns)
     elif synthesized:
-        order_by_cols = [synthesized, "__data_transfer_commit_time"]
+        key_cols = [synthesized]
     else:
-        order_by_cols = ["__data_transfer_commit_time"]
+        # Fallback: if absolutely no identifier, use commit time as the sole key
+        key_cols = ["__data_transfer_commit_time"]
 
-    order_by = ", ".join([f"`{c}`" for c in order_by_cols])
+    order_by = ", ".join([f"`{c}`" for c in key_cols])
 
     # engine
     if engine.lower().startswith("replacing"):
         engine_sql = f"ENGINE = ReplacingMergeTree(__data_transfer_commit_time)\nORDER BY ({order_by})"
     else:
-        engine_sql = f"ENGINE = MergeTree()\nORDER BY ({order_by})"
+        # For plain MergeTree we can include commit time to keep append order deterministic
+        non_replacing_order_by = ", ".join([f"`{c}`" for c in (key_cols + (["__data_transfer_commit_time"] if "__data_transfer_commit_time" not in key_cols else []))])
+        engine_sql = f"ENGINE = MergeTree()\nORDER BY ({non_replacing_order_by})"
 
     cols_sql = ",\n  ".join(col_defs)
     ddl = f"CREATE TABLE IF NOT EXISTS `{table}` (\n  {cols_sql}\n) {engine_sql}"
     insertable_columns = mysql_col_names + ["__data_transfer_commit_time", "__data_transfer_delete_time"]
     return ddl, insertable_columns
+
+
+def ensure_clickhouse_columns(ch_client, table, desired_columns):
+    """
+    Ensure that ClickHouse table `table` has all columns in desired_columns.
+    desired_columns: list of dicts {name, type_sql, default_expr(optional)} or tuples (name, type_sql)
+    Adds missing columns with ALTER TABLE ... ADD COLUMN if needed.
+    """
+    try:
+        existing = ch_client.execute(f"DESCRIBE TABLE `{table}`")
+        existing_names = {row[0] for row in existing}
+    except Exception:
+        # If table doesn't exist, caller should create with DDL
+        return
+    for item in desired_columns:
+        if isinstance(item, tuple):
+            name, type_sql = item
+            default_expr = None
+        else:
+            name = item["name"]
+            type_sql = item["type_sql"]
+            default_expr = item.get("default_expr")
+        if name not in existing_names:
+            try:
+                if default_expr:
+                    ch_client.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{name}` {type_sql} DEFAULT {default_expr}")
+                else:
+                    ch_client.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{name}` {type_sql}")
+                log.info("Added missing column %s to %s", name, table)
+            except Exception:
+                log.exception("Failed to add column %s to %s", name, table)

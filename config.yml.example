@@ -23,6 +23,9 @@ migration:
   ddl_engine: "ReplacingMergeTree"
   low_cardinality_strings: true
   workers: 4   # number of parallel table workers (default 4)
+  # Timezone configuration for datetime/timestamp columns
+  mysql_timezone: "Europe/Moscow"  # Set to your MySQL server timezone
+  clickhouse_timezone: "Europe/Moscow"  # Set to desired ClickHouse timezone
 
 # Where migres writes binlog checkpoint for Transferia
 checkpoint_file: /app/data/binlog_checkpoint.json

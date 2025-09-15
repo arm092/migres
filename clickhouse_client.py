@@ -4,13 +4,21 @@ from clickhouse_driver import Client
 log = logging.getLogger(__name__)
 
 class CHClient:
-    def __init__(self, cfg):
+    def __init__(self, cfg, mig_cfg=None):
         self.db = cfg["database"]
+        
+        # Configure timezone settings
+        settings = {"input_format_null_as_default": 1}
+        if mig_cfg and mig_cfg.get("clickhouse_timezone"):
+            timezone = mig_cfg["clickhouse_timezone"]
+            settings["timezone"] = timezone
+            log.info("ClickHouse timezone set to: %s", timezone)
 
         # Step 1: connect without database to ensure DB exists
         tmp_client = Client(
             host=cfg["host"], port=cfg.get("port", 9000),
-            user=cfg.get("user", "default"), password=cfg.get("password", "")
+            user=cfg.get("user", "default"), password=cfg.get("password", ""),
+            settings=settings
         )
         tmp_client.execute(f"CREATE DATABASE IF NOT EXISTS `{self.db}`")
         tmp_client.disconnect()
@@ -20,7 +28,7 @@ class CHClient:
             host=cfg["host"], port=cfg.get("port", 9000),
             user=cfg.get("user", "default"), password=cfg.get("password", ""),
             database=self.db,
-            settings={"input_format_null_as_default": 1}
+            settings=settings
         )
         log.info(
             "ClickHouse client initialized for %s:%s/%s",
