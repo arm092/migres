@@ -22,6 +22,8 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 
 ### CDC Mode (Change Data Capture)
 - 🔄 **Real-time replication** from MySQL binlog
+- ⚡ **Queue-based event batching** with configurable delay
+- 🎯 **Smart event grouping** (combines multiple events into single operations)
 - 🏗️ **Automatic schema synchronization**:
   - ✅ CREATE TABLE (new table creation)
   - ✅ DROP TABLE (table deletion)
@@ -33,6 +35,7 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 - 🎯 **Table filtering** (include/exclude)
 - 💾 **Checkpoint persistence** (resume from last position)
 - 🌍 **Timezone-aware datetime handling** (DateTime64 with timezone)
+- 🛡️ **Error handling** with failed operation dumps
 
 ### Operations
 - 📑 **Detailed logging** (visible via `docker compose logs -f`)
@@ -66,13 +69,24 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
    - Runs snapshot mode first if `snapshot_before: true`
    - Ensures complete baseline before streaming
 
-2. **Real-time streaming**
-   - Connects to MySQL binlog stream
+2. **Queue-based event processing**
+   - Events are accumulated in a queue as they arrive from binlog
+   - Timer-based processing every `batch_delay_seconds` (configurable)
+   - Continuous operation: keeps receiving events while processing queue
+
+3. **Event batching and grouping**
+   - **INSERT events**: Multiple INSERTs for same table → Single INSERT with multiple rows
+   - **UPDATE events**: Multiple UPDATEs for same table → Single INSERT with multiple rows
+   - **DELETE events**: Multiple DELETEs for same table → Single INSERT with multiple rows
+   - **DDL events**: Processed immediately (not queued)
+
+4. **Real-time streaming**
+   - Connects to MySQL binlog stream (non-blocking)
    - Processes INSERT/UPDATE/DELETE events
    - Auto-detects schema changes (ADD/DROP/RENAME/MODIFY)
-   - Applies changes to ClickHouse immediately
+   - Applies changes to ClickHouse in batches
 
-3. **Schema synchronization**
+5. **Schema synchronization**
    - **CREATE TABLE**: Creates new table in ClickHouse
    - **DROP TABLE**: Removes table from ClickHouse
    - **ADD COLUMN**: Creates new column with defaults
@@ -80,7 +94,12 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
    - **RENAME COLUMN**: Renames column in ClickHouse
    - **MODIFY COLUMN**: Changes type and defaults
 
-4. **Checkpoint persistence**
+6. **Error handling**
+   - Failed operations are dumped to JSON files for manual review
+   - Includes timestamp, error details, and operation information
+   - Allows for manual recovery of failed operations
+
+7. **Checkpoint persistence**
    - Saves binlog position periodically
    - Resumes from last position on restart
 
@@ -156,6 +175,7 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000
     checkpoint_interval_seconds: 5
+    batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
     server_id: 4379  # Unique ID for binlog replication
 
 state_file: "data/state.json"
@@ -210,8 +230,16 @@ docker compose logs -f
 [INFO] Starting migres (CDC) mode...
 [INFO] CDC: running initial snapshot before starting binlog streaming...
 [INFO] CDC: initial snapshot completed, starting binlog streaming...
-[INFO] CDC EVENT: {"type": "UpdateRowsEvent", "table": "users", "rows": [...]}
-[INFO] CDC: inserted 1 row(s) into users (UPDATE->upsert)
+[INFO] CDC: batch_delay_seconds=5.0, queue-based processing=True
+[INFO] CDC: event queued for mydb.users (UpdateRowsEvent) with 1 rows - queue size: 1
+[INFO] CDC: event queued for mydb.users (UpdateRowsEvent) with 1 rows - queue size: 2
+[INFO] CDC: processing queue (time since last process: 5.0s, queue size: 2)
+[INFO] CDC: processing 2 events from queue
+[INFO] CDC: processing 1 groups
+[INFO] CDC: processing group mydb.users (UpdateRowsEvent) with 2 events containing 2 total rows
+[INFO] CDC: inserted 2 row(s) into users (UPDATE->upsert)
+[INFO] CDC: successfully processed 2 rows for mydb.users (UpdateRowsEvent)
+[INFO] CDC: successfully processed 2 rows from queue
 [INFO] CDC: added column email_verified to users (direct ALTER)
 [INFO] CDC: detected CREATE TABLE for new_table, creating table in ClickHouse
 [INFO] CDC: created table new_table in ClickHouse
@@ -311,3 +339,59 @@ docker compose up
 - **Workers**: Adjust `workers` based on CPU cores (default: 4)
 - **Checkpoint frequency**: Reduce `checkpoint_interval_seconds` for more frequent saves
 - **Low cardinality**: Disable `low_cardinality_strings` if memory is limited
+- **CDC batching**: Adjust `batch_delay_seconds` for optimal performance:
+  - `0` = immediate processing (no batching)
+  - `5-15` = good balance for most workloads
+  - `30+` = for high-volume, less time-sensitive scenarios
+
+### CDC Batching Configuration
+
+The `batch_delay_seconds` setting controls how events are processed:
+
+**Immediate Processing (`batch_delay_seconds: 0`):**
+```yaml
+cdc:
+  batch_delay_seconds: 0  # Each event processed immediately
+```
+- ✅ Lowest latency
+- ❌ More ClickHouse operations
+- ❌ Higher load on ClickHouse
+
+**Batched Processing (`batch_delay_seconds: 5`):**
+```yaml
+cdc:
+  batch_delay_seconds: 5  # Events accumulated for 5 seconds
+```
+- ✅ Reduced ClickHouse load
+- ✅ Better performance for bulk operations
+- ✅ Smart grouping of similar events
+- ⚠️ 5-second delay for data availability
+
+**High-Volume Batching (`batch_delay_seconds: 30`):**
+```yaml
+cdc:
+  batch_delay_seconds: 30  # Events accumulated for 30 seconds
+```
+- ✅ Maximum ClickHouse efficiency
+- ✅ Best for bulk data processing
+- ❌ 30-second delay for data availability
+
+### Batching Examples
+
+**Example 1: Multiple INSERTs**
+```
+MySQL: 100 INSERT statements for table 'orders'
+Result: 1 ClickHouse INSERT with 100 rows
+```
+
+**Example 2: Mixed Operations**
+```
+MySQL: 50 UPDATEs for 'users' + 30 INSERTs for 'orders'
+Result: 2 ClickHouse INSERTs (1 with 50 rows, 1 with 30 rows)
+```
+
+**Example 3: Error Handling**
+```
+Failed operation → Dumped to failed_operations_20250922_151207.json
+Contains: timestamp, error details, operation data for manual review
+```

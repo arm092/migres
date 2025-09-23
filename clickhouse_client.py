@@ -36,7 +36,6 @@ class CHClient:
         )
 
     def execute(self, sql, params=None):
-        log.debug("CH SQL: %s", sql)
         return self.client.execute(sql, params or None)
 
     def insert_rows(self, table, columns, rows):
@@ -48,6 +47,8 @@ class CHClient:
             return
         cols = ",".join([f"`{c}`" for c in columns])
         sql = f"INSERT INTO `{self.db}`.`{table}` ({cols}) VALUES"
+        
+        
         try:
             self.client.execute(sql, rows)
         except Exception:
