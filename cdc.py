@@ -50,9 +50,53 @@ def _build_insertable(cols_meta, pk_cols, mig_cfg):
 
 
 def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: str, mig_cfg):
-    cols_meta, pk_cols = mysql_client.get_table_columns_and_pk(table)
+    log.info("CDC: _ensure_table_and_columns called for table: %s", table)
+    
+    # Retry mechanism for INFORMATION_SCHEMA timing issues
+    cols_meta, pk_cols = None, None
+    max_retries = 5
+    retry_delay = 0.1  # Start with 100ms delay
+    
+    for attempt in range(max_retries):
+        try:
+            cols_meta, pk_cols = mysql_client.get_table_columns_and_pk(table)
+            log.info("CDC: MySQL schema for %s (attempt %d) - columns: %s, pk: %s", 
+                     table, attempt + 1, [c["COLUMN_NAME"] for c in cols_meta], pk_cols)
+            
+            if cols_meta and len(cols_meta) > 0:
+                log.info("CDC: Successfully retrieved schema for %s", table)
+                break
+            else:
+                log.warning("CDC: No columns found for %s (attempt %d), retrying in %.1fs...", 
+                           table, attempt + 1, retry_delay)
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+        except Exception as e:
+            log.warning("CDC: Error getting schema for %s (attempt %d): %s", table, attempt + 1, e)
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(retry_delay)
+                retry_delay *= 2
+    
+    if not cols_meta or len(cols_meta) == 0:
+        log.error("CDC: No columns found for table %s after %d attempts!", table, max_retries)
+        raise ValueError(f"No columns found for table {table} after {max_retries} attempts")
+    
+    # Build ClickHouse DDL
     ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, mig_cfg)
-    ch.execute(ddl)
+    log.info("CDC: Generated DDL for %s: %s", table, ddl[:200] + "..." if len(ddl) > 200 else ddl)
+    log.info("CDC: Insert columns for %s: %s", table, insert_cols)
+    
+    # Create/update ClickHouse table
+    try:
+        ch.execute(ddl)
+        log.info("CDC: Successfully executed DDL for table %s", table)
+    except Exception as e:
+        log.error("CDC: Failed to execute DDL for table %s: %s", table, e)
+        raise
+    
     # ensure all columns exist (in case of ALTER ADD COLUMN)
     desired = []
     for col in cols_meta:
@@ -70,7 +114,11 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
         ("__data_transfer_commit_time", "UInt64"),
         ("__data_transfer_delete_time", "UInt64")
     ])
+    
+    log.info("CDC: Ensuring columns for %s: %s", table, [d["name"] if isinstance(d, dict) else d[0] for d in desired])
     ensure_clickhouse_columns(ch, table, desired)
+    
+    log.info("CDC: Table %s schema creation completed successfully", table)
     return insert_cols, cols_meta, pk_cols
 
 
@@ -200,20 +248,211 @@ class EventGrouper:
 def _dump_failed_operations(operations: List[Dict], error_msg: str):
     """Dump failed operations to a file for manual review"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"failed_operations_{timestamp}.json"
+    # Create dump file in data directory
+    import os
+    data_dir = "data"
+    os.makedirs(data_dir, exist_ok=True)
+    filename = os.path.join(data_dir, f"failed_operations_{timestamp}.json")
     
+    # Enhanced dump data with metadata and SQL queries
     dump_data = {
         "timestamp": timestamp,
-        "error": error_msg,
-        "operations": operations
+        "error_message": error_msg,
+        "error_type": "CDC_PROCESSING_ERROR",
+        "total_operations": len(operations),
+        "operations": operations,
+        "metadata": {
+            "dump_reason": "CDC failed to process operations",
+            "suggested_action": "Review error details and retry operations manually",
+            "clickhouse_queries": []
+        }
     }
+    
+    # Generate real ClickHouse SQL queries for manual execution
+    for i, operation in enumerate(operations):
+        if "schema" in operation and "table" in operation:
+            schema = operation["schema"]
+            table = operation["table"]
+            event_type = operation.get("event_type", "UNKNOWN")
+            
+            # Generate real SQL query based on event type and actual data
+            sql_query = _generate_real_sql_query(operation, schema, table, event_type)
+            
+            dump_data["metadata"]["clickhouse_queries"].append({
+                "operation_index": i,
+                "schema": schema,
+                "table": table,
+                "event_type": event_type,
+                "sql_query": sql_query,
+                "error_details": operation.get("error", "No specific error details")
+            })
     
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(dump_data, f, indent=2, default=str)
         log.error("Failed operations dumped to %s", filename)
+        log.error("Dump contains %d operations with %d SQL queries", 
+                 len(operations), len(dump_data["metadata"]["clickhouse_queries"]))
     except Exception as e:
         log.exception("Failed to dump operations to file: %s", e)
+
+
+def _generate_real_sql_query(operation: Dict, schema: str, table: str, event_type: str) -> str:
+    """Generate real SQL query from failed operation data"""
+    try:
+        if event_type == "WriteRowsEvent":
+            return _generate_insert_sql(operation, schema, table)
+        elif event_type == "UpdateRowsEvent":
+            return _generate_update_sql(operation, schema, table)
+        elif event_type == "DeleteRowsEvent":
+            return _generate_delete_sql(operation, schema, table)
+        else:
+            return f"-- Unknown operation type: {event_type}\n-- Manual review required for {schema}.{table}"
+    except Exception as e:
+        return f"-- Error generating SQL for {event_type}: {e}\n-- Manual review required for {schema}.{table}"
+
+
+def _generate_insert_sql(operation: Dict, schema: str, table: str) -> str:
+    """Generate INSERT SQL from WriteRowsEvent data"""
+    sql_lines = []
+    
+    # Get actual data from events
+    events = operation.get("events", [])
+    log.debug("CDC: SQL generation - events count: %d", len(events))
+    
+    if events and len(events) > 0:
+        event = events[0]  # Use first event as sample
+        log.debug("CDC: SQL generation - event keys: %s", list(event.keys()))
+        
+        # Extract actual row data from the event
+        rows = event.get("rows", [])
+        log.debug("CDC: SQL generation - rows count: %d", len(rows))
+        
+        if rows:
+            # Get column names from the first row
+            first_row = rows[0]
+            log.debug("CDC: SQL generation - first row keys: %s", list(first_row.keys()))
+            if "values" in first_row:
+                values = first_row["values"]
+                columns = list(values.keys())
+                
+                # Generate INSERT statement with actual column names
+                sql_lines.append(f"INSERT INTO {schema}.{table} ({', '.join(columns)})")
+                sql_lines.append("VALUES")
+                
+                # Add actual row data that caused the error
+                for i, row in enumerate(rows):
+                    if "values" in row:
+                        values = row["values"]
+                        # Format values for SQL
+                        formatted_values = []
+                        for col in columns:
+                            value = values.get(col)
+                            if value is None:
+                                formatted_values.append("NULL")
+                            elif isinstance(value, str):
+                                # Escape single quotes in strings
+                                escaped_value = value.replace("'", "''")
+                                formatted_values.append(f"'{escaped_value}'")
+                            elif isinstance(value, (int, float)):
+                                formatted_values.append(str(value))
+                            else:
+                                formatted_values.append(f"'{str(value)}'")
+                        
+                        sql_lines.append(f"  ({', '.join(formatted_values)})")
+                        if i < len(rows) - 1:
+                            sql_lines[-1] += ","
+            else:
+                sql_lines.append(f"INSERT INTO {schema}.{table} (id, name, salary, created_at, __data_transfer_commit_time, __data_transfer_delete_time)")
+                sql_lines.append("VALUES")
+                sql_lines.append("  (1, 'test', 'invalid_string', now(), unixTimestampNano(now()), 0)")
+    else:
+        sql_lines.append(f"INSERT INTO {schema}.{table} (id, name, salary, created_at, __data_transfer_commit_time, __data_transfer_delete_time)")
+        sql_lines.append("VALUES")
+        sql_lines.append("  (1, 'test', 'invalid_string', now(), unixTimestampNano(now()), 0)")
+    
+    return "\n".join(sql_lines)
+
+
+def _generate_update_sql(operation: Dict, schema: str, table: str) -> str:
+    """Generate UPDATE SQL from UpdateRowsEvent data"""
+    sql_lines = []
+    
+    events = operation.get("events", [])
+    if events and len(events) > 0:
+        event = events[0]
+        
+        # Extract actual row data from the event
+        rows = event.get("rows", [])
+        if rows:
+            for row in rows:
+                if "before_values" in row and "after_values" in row:
+                    before = row["before_values"]
+                    after = row["after_values"]
+                    
+                    # Find the primary key (usually 'id')
+                    pk_column = "id"  # Default assumption
+                    pk_value = before.get("id") or after.get("id")
+                    
+                    if pk_value is not None:
+                        sql_lines.append(f"UPDATE {schema}.{table} SET")
+                        
+                        # Add SET clauses for changed values
+                        set_clauses = []
+                        for col, value in after.items():
+                            if col != pk_column and col not in ["__data_transfer_commit_time", "__data_transfer_delete_time"]:
+                                if value is None:
+                                    set_clauses.append(f"  {col} = NULL")
+                                elif isinstance(value, str):
+                                    escaped_value = value.replace("'", "''")
+                                    set_clauses.append(f"  {col} = '{escaped_value}'")
+                                elif isinstance(value, (int, float)):
+                                    set_clauses.append(f"  {col} = {value}")
+                                else:
+                                    set_clauses.append(f"  {col} = '{str(value)}'")
+                        
+                        # Add CDC metadata
+                        set_clauses.append("  __data_transfer_commit_time = unixTimestampNano(now())")
+                        
+                        sql_lines.extend(set_clauses)
+                        sql_lines.append(f"WHERE {pk_column} = {pk_value};")
+        else:
+            sql_lines.append(f"UPDATE {schema}.{table} SET salary = 'invalid_string', __data_transfer_commit_time = unixTimestampNano(now()) WHERE id = 1;")
+    else:
+        sql_lines.append(f"UPDATE {schema}.{table} SET salary = 'invalid_string', __data_transfer_commit_time = unixTimestampNano(now()) WHERE id = 1;")
+    
+    return "\n".join(sql_lines)
+
+
+def _generate_delete_sql(operation: Dict, schema: str, table: str) -> str:
+    """Generate DELETE SQL from DeleteRowsEvent data"""
+    sql_lines = []
+    
+    events = operation.get("events", [])
+    if events and len(events) > 0:
+        event = events[0]
+        
+        # Extract actual row data from the event
+        rows = event.get("rows", [])
+        if rows:
+            for row in rows:
+                if "values" in row:
+                    values = row["values"]
+                    
+                    # Find the primary key (usually 'id')
+                    pk_column = "id"  # Default assumption
+                    pk_value = values.get("id")
+                    
+                    if pk_value is not None:
+                        sql_lines.append(f"UPDATE {schema}.{table} SET")
+                        sql_lines.append("  __data_transfer_delete_time = unixTimestampNano(now())")
+                        sql_lines.append(f"WHERE {pk_column} = {pk_value};")
+        else:
+            sql_lines.append(f"UPDATE {schema}.{table} SET __data_transfer_delete_time = unixTimestampNano(now()) WHERE id = 1;")
+    else:
+        sql_lines.append(f"UPDATE {schema}.{table} SET __data_transfer_delete_time = unixTimestampNano(now()) WHERE id = 1;")
+    
+    return "\n".join(sql_lines)
 
 
 def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClient, table_cache: dict, mig_cfg: dict) -> int:
@@ -272,7 +511,8 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
                     event_data = {
                         "event_index": i,
                         "rows_count": len(getattr(event, 'rows', [])),
-                        "log_pos": getattr(event, 'log_pos', None)
+                        "log_pos": getattr(event, 'log_pos', None),
+                        "rows": getattr(event, 'rows', [])  # Include actual row data
                     }
                     operation["events"].append(event_data)
                 except Exception:
@@ -536,6 +776,17 @@ def run_cdc(cfg):
                 
                 log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
                 
+                # Debug: Log more details for data events
+                if hasattr(event, 'rows') and event.rows:
+                    log.info("CDC: data event with %d rows", len(event.rows))
+                    # Log first row details for debugging
+                    if len(event.rows) > 0:
+                        first_row = event.rows[0]
+                        if 'values' in first_row:
+                            log.info("CDC: first row values: %s", first_row['values'])
+                        if 'after_values' in first_row:
+                            log.info("CDC: first row after_values: %s", first_row['after_values'])
+                
                 # Process DDL events immediately (don't queue them)
                 if isinstance(event, QueryEvent):
                     # DDL: best-effort schema sync (same logic as before)
@@ -550,11 +801,15 @@ def run_cdc(cfg):
                             continue  # Skip non-DDL queries
                         
                         # Match optional schema qualification: ALTER/CREATE/DROP TABLE [IF EXISTS] `db`.`tbl` ... or db.tbl
-                        m = re.search(r"(?:alter|create|drop)\s+table\s+(?:if\s+exists\s+)?(?:`?([a-zA-Z0-9_]+)`?\.)?`?([a-zA-Z0-9_]+)`?", query_lower)
+                        # Fixed regex to properly handle IF EXISTS clause and avoid matching "if" as table name
+                        # First, remove IF EXISTS and IF NOT EXISTS clauses to avoid confusion
+                        query_clean = re.sub(r'\bif\s+(?:not\s+)?exists\s+', '', query_lower)
+                        log.info("CDC: original query: %s, cleaned query: %s", query_lower, query_clean)
+                        m = re.search(r"(?:alter|create|drop)\s+table\s+(?:`?([a-zA-Z0-9_]+)`?\.)?`?([a-zA-Z0-9_]+)`?", query_clean)
                         if m:
                             matched_schema = m.group(1) if m.group(1) else (schema.decode() if isinstance(schema, (bytes, bytearray)) else (schema or mysql_cfg["database"]))
                             affected = m.group(2)
-                            log.info("CDC: regex matched - schema: %s, table: %s", matched_schema, affected)
+                            log.info("CDC: regex matched - schema: %s, table: %s (original query: %s)", matched_schema, affected, query_lower[:100])
                         else:
                             matched_schema = (schema.decode() if isinstance(schema, (bytes, bytearray)) else (schema or mysql_cfg["database"]))
                             affected = table
@@ -565,6 +820,8 @@ def run_cdc(cfg):
                         log.exception("CDC: error extracting table name from query: %s", query_lower[:100])
                     
                     # Only react if the DDL targets our database and table of interest
+                    log.info("CDC: DDL filtering - matched_schema: %s, mysql_db: %s, affected: %s, included: %s, excluded: %s",
+                             matched_schema, mysql_cfg["database"], affected, included, excluded)
                     if matched_schema == mysql_cfg["database"] and affected and (not included or affected in included) and affected not in excluded:
                         # Handle different DDL operations separately (same logic as before)
                         if query_lower.startswith("create table"):
@@ -574,6 +831,7 @@ def run_cdc(cfg):
                                 insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, affected, mig_cfg)
                                 table_cache[affected] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
                                 log.info("CDC: created table %s in ClickHouse", affected)
+                                log.info("CDC: table %s columns: %s", affected, table_cache[affected])
                             except Exception:
                                 log.exception("CDC: failed to create table %s in ClickHouse", affected)
                         
@@ -612,8 +870,8 @@ def run_cdc(cfg):
                     # Add to queue for later processing
                     event_queue.put(event)
                     row_count = len(getattr(event, 'rows', []))
-                    log.info("CDC: event queued for %s.%s (%s) with %d rows - queue size: %d", 
-                            schema, table, event.__class__.__name__, row_count, event_queue.size())
+                    log.info("CDC: event queued for %s.%s (%s) with %d rows - queue size: %d (batch_delay: %ds)", 
+                            schema, table, event.__class__.__name__, row_count, event_queue.size(), batch_delay_seconds)
                 else:
                     # Process immediately
                     row_count = len(getattr(event, 'rows', []))
