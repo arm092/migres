@@ -209,6 +209,23 @@ docker compose up
 docker compose logs -f
 ```
 
+## Testing
+
+The project includes a comprehensive test suite in the `test/` directory:
+
+- **`test/test_cdc_batching.py`** - Main CDC batching test (5000 operations)
+- **`test/test_error_scenarios.py`** - Error handling and recovery tests
+- **`test/run_test.py`** - Test runner for different scenarios
+- **`test/monitor_cdc.py`** - Real-time CDC monitoring
+
+### Running Tests
+```bash
+cd test
+python run_test.py
+```
+
+See `test/README.md` for detailed testing instructions.
+
 ---
 
 ## Examples

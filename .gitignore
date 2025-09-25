@@ -3,3 +3,4 @@ data
 config.yml
 .idea
 __pycache__
+test/__pycache__
