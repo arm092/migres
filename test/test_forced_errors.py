@@ -174,7 +174,7 @@ def test_forced_clickhouse_errors():
         # Cleanup
         try:
             cur = mysql_client.cn.cursor()
-            # cur.execute("DROP TABLE IF EXISTS test_error_table")
+            cur.execute("DROP TABLE IF EXISTS test_error_table")
             cur.close()
             mysql_client.cn.commit()
             print("✅ Test table cleaned up")

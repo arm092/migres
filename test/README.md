@@ -6,6 +6,7 @@ This directory contains test scripts for the CDC (Change Data Capture) batching 
 
 - **`test_cdc_batching.py`** - Main CDC batching test with 5000 INSERT/UPDATE/DELETE operations
 - **`test_forced_errors.py`** - Forced error test that creates ClickHouse constraints that will definitely fail
+- **`test_notifications.py`** - MS Teams notification system test
 - **`run_test.py`** - Test runner script to execute different test scenarios
 - **`monitor_cdc.py`** - Real-time monitoring script to watch ClickHouse table counts
 
@@ -28,6 +29,7 @@ python run_test.py
 cd test
 python test_cdc_batching.py
 python test_forced_errors.py
+python test_notifications.py
 ```
 
 #### Option 3: Monitor CDC processing
@@ -51,6 +53,13 @@ python monitor_cdc.py
 - ✅ Inserts string data that will cause ClickHouse DECIMAL conversion errors
 - ✅ Forces CDC to fail when trying to replicate string data to DECIMAL column
 - ✅ Generates error dump files with real SQL queries containing the actual problematic data
+
+### Notifications Test (test_notifications.py)
+- ✅ Reads notification configuration from config.yml
+- ✅ Tests MS Teams webhook connectivity
+- ✅ Sends test notifications (Error, Warning, Info)
+- ✅ Verifies notifications appear in MS Teams channel
+- ✅ Tests rate limiting functionality
 
 ## Error Dump Files
 

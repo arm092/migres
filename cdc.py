@@ -11,6 +11,7 @@ from mysql_client import MySQLClient
 from clickhouse_client import CHClient
 from schema_and_ddl import build_table_ddl, ensure_clickhouse_columns
 from state_json import StateJson
+from notifications import initialize_notifications, notify_cdc_error, notify_cdc_warning, notify_cdc_info, notify_cdc_startup, notify_cdc_shutdown
 
 from pymysqlreplication import BinLogStreamReader
 from pymysqlreplication.row_event import WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent
@@ -82,6 +83,19 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
     
     if not cols_meta or len(cols_meta) == 0:
         log.error("CDC: No columns found for table %s after %d attempts!", table, max_retries)
+        
+        # Send notification for schema detection failure
+        notify_cdc_error(
+            error_type="Schema Detection Failure",
+            table=table,
+            error_message=f"Could not retrieve table schema after {max_retries} attempts",
+            operation_details={
+                "Table": table,
+                "Attempts": max_retries,
+                "Error": "No columns found in INFORMATION_SCHEMA"
+            }
+        )
+        
         raise ValueError(f"No columns found for table {table} after {max_retries} attempts")
     
     # Build ClickHouse DDL
@@ -523,6 +537,24 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
     # Dump failed operations if any
     if failed_operations:
         _dump_failed_operations(failed_operations, "Failed to process grouped events")
+        
+        # Send notification for failed operations
+        for operation in failed_operations:
+            schema = operation.get("schema", "unknown")
+            table = operation.get("table", "unknown")
+            error = operation.get("error", "Unknown error")
+            event_count = operation.get("event_count", 0)
+            
+            notify_cdc_error(
+                error_type="Processing Error",
+                table=f"{schema}.{table}",
+                error_message=f"Failed to process {event_count} events: {error}",
+                operation_details={
+                    "Event Count": event_count,
+                    "Event Type": operation.get("event_type", "unknown"),
+                    "Error": error
+                }
+            )
     
     return total_rows
 
@@ -661,6 +693,19 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
 def run_cdc(cfg):
     mysql_cfg = cfg["mysql"]
     ch_cfg = cfg["clickhouse"]
+    
+    # Initialize notifications
+    notification_config = cfg.get("notifications", {})
+    initialize_notifications(notification_config)
+    
+    # Send startup notification
+    config_summary = {
+        "MySQL": f"{mysql_cfg['host']}:{mysql_cfg['port']}/{mysql_cfg['database']}",
+        "ClickHouse": f"{ch_cfg['host']}:{ch_cfg['port']}/{ch_cfg['database']}",
+        "Batch Delay": f"{cfg['migration']['cdc']['batch_delay_seconds']}s",
+        "Mode": "CDC"
+    }
+    notify_cdc_startup(config_summary)
     mig_cfg = cfg.get("migration", {})
     cdc_cfg = mig_cfg.get("cdc", {})
 
@@ -832,8 +877,33 @@ def run_cdc(cfg):
                                 table_cache[affected] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
                                 log.info("CDC: created table %s in ClickHouse", affected)
                                 log.info("CDC: table %s columns: %s", affected, table_cache[affected])
-                            except Exception:
+                                
+                                # Send notification for successful table creation
+                                notify_cdc_info(
+                                    info_type="Table Created",
+                                    message=f"Successfully created table {affected} in ClickHouse",
+                                    details={
+                                        "Table": affected,
+                                        "Schema": matched_schema,
+                                        "Columns": len(cols_meta),
+                                        "Primary Keys": pk_cols
+                                    }
+                                )
+                            except Exception as e:
                                 log.exception("CDC: failed to create table %s in ClickHouse", affected)
+                                
+                                # Send notification for table creation failure
+                                notify_cdc_error(
+                                    error_type="Table Creation Failed",
+                                    table=f"{matched_schema}.{affected}",
+                                    error_message=f"Failed to create table in ClickHouse: {str(e)}",
+                                    operation_details={
+                                        "Operation": "CREATE TABLE",
+                                        "Schema": matched_schema,
+                                        "Table": affected,
+                                        "Error": str(e)
+                                    }
+                                )
                         
                         elif query_lower.startswith("drop table"):
                             # DROP TABLE: Drop the table from ClickHouse
@@ -844,8 +914,32 @@ def run_cdc(cfg):
                                 if affected in table_cache:
                                     del table_cache[affected]
                                 log.info("CDC: dropped table %s in ClickHouse", affected)
-                            except Exception:
+                                
+                                # Send notification for successful table drop
+                                notify_cdc_info(
+                                    info_type="Table Dropped",
+                                    message=f"Successfully dropped table {affected} from ClickHouse",
+                                    details={
+                                        "Table": affected,
+                                        "Schema": matched_schema,
+                                        "Operation": "DROP TABLE"
+                                    }
+                                )
+                            except Exception as e:
                                 log.exception("CDC: failed to drop table %s in ClickHouse", affected)
+                                
+                                # Send notification for table drop failure
+                                notify_cdc_error(
+                                    error_type="Table Drop Failed",
+                                    table=f"{matched_schema}.{affected}",
+                                    error_message=f"Failed to drop table from ClickHouse: {str(e)}",
+                                    operation_details={
+                                        "Operation": "DROP TABLE",
+                                        "Schema": matched_schema,
+                                        "Table": affected,
+                                        "Error": str(e)
+                                    }
+                                )
                         
                         elif query_lower.startswith("alter table"):
                             # ALTER TABLE: Handle column operations (same logic as before)
@@ -899,6 +993,9 @@ def run_cdc(cfg):
                 log.exception("Error handling binlog event")
                 time.sleep(1)
     finally:
+        # Send shutdown notification
+        notify_cdc_shutdown("CDC process stopped")
+        
         # Process any remaining events in queue before closing
         if batch_delay_seconds > 0:
             remaining_events = event_queue.get_all()

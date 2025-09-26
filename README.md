@@ -36,10 +36,12 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 - 💾 **Checkpoint persistence** (resume from last position)
 - 🌍 **Timezone-aware datetime handling** (DateTime64 with timezone)
 - 🛡️ **Error handling** with failed operation dumps
+- 📱 **MS Teams notifications** for errors, warnings, and important events
 
 ### Operations
 - 📑 **Detailed logging** (visible via `docker compose logs -f`)
 - 🐳 **Docker support** with hot-reload for development
+- 📢 **Real-time notifications** to MS Teams channels
 
 ---
 
@@ -180,6 +182,12 @@ migration:
 
 state_file: "data/state.json"
 checkpoint_file: "data/binlog_checkpoint.json"
+
+# MS Teams Notifications
+notifications:
+  enabled: true
+  webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
+  rate_limit_seconds: 60  # Minimum seconds between notifications (0 = no limit)
 ```
 
 ---
@@ -214,7 +222,8 @@ docker compose logs -f
 The project includes a comprehensive test suite in the `test/` directory:
 
 - **`test/test_cdc_batching.py`** - Main CDC batching test (5000 operations)
-- **`test/test_error_scenarios.py`** - Error handling and recovery tests
+- **`test/test_forced_errors.py`** - Forced error test with type conversion errors
+- **`test/test_notifications.py`** - MS Teams notification system test
 - **`test/run_test.py`** - Test runner for different scenarios
 - **`test/monitor_cdc.py`** - Real-time CDC monitoring
 
@@ -262,6 +271,37 @@ See `test/README.md` for detailed testing instructions.
 [INFO] CDC: created table new_table in ClickHouse
 [INFO] CDC: detected DROP TABLE for old_table, dropping table in ClickHouse
 [INFO] CDC: dropped table old_table in ClickHouse
+```
+
+**MS Teams Notifications:**
+```
+🚀 CDC Process Started
+CDC (Change Data Capture) process has started successfully
+
+Level: INFO
+Timestamp: 2025-01-24 10:30:00 UTC
+
+Details:
+- MySQL: localhost:3306/mydb
+- ClickHouse: localhost:9000/mydb
+- Batch Delay: 5s
+- Mode: CDC
+```
+
+```
+🚨 CDC Error: Processing Error
+Table: mydb.users
+Error: Failed to process 5 events: Connection timeout
+
+Level: ERROR
+Timestamp: 2025-01-24 10:30:00 UTC
+
+Details:
+- Error Type: Processing Error
+- Table: mydb.users
+- Event Count: 5
+- Event Type: WriteRowsEvent
+- Error: Connection timeout
 ```
 
 ### Schema Changes in Action
