@@ -120,7 +120,7 @@ def run_snapshot(cfg):
     # 1) record binlog pos
     master_status = master_mysql.show_master_status()
     if not master_status:
-        log.warning("SHOW MASTER STATUS returned nothing. Is binlog enabled?")
+        log.warning("Binary log status returned nothing. Is binlog enabled?")
     else:
         file, pos = master_status
         state.set_binlog(file, pos)

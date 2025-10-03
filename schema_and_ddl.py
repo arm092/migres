@@ -92,7 +92,6 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
     pk_columns: list of pk column names
     Returns: DDL string and list of insertable columns (mysql columns order)
     """
-    low = bool(mig_cfg.get("low_cardinality_strings", True))
     engine = mig_cfg.get("ddl_engine", "ReplacingMergeTree")
 
     col_defs = []

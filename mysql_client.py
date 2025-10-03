@@ -29,14 +29,62 @@ class MySQLClient:
             except Exception:
                 pass
 
-    def show_master_status(self):
+    def get_mysql_version(self):
+        """Get MySQL version for compatibility checks"""
         cur = self.cn.cursor()
-        cur.execute("SHOW MASTER STATUS")
-        row = cur.fetchone()
-        cur.close()
-        if not row:
+        try:
+            cur.execute("SELECT VERSION()")
+            version_str = cur.fetchone()[0]
+            cur.close()
+            
+            log.debug("MySQL version: %s", version_str)
+            
+            # Parse version string (e.g., "8.4.0" or "8.0.35")
+            try:
+                version_parts = version_str.split('.')
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
+                return major, minor
+            except (ValueError, IndexError):
+                # Fallback to assuming older version
+                log.warning("Could not parse MySQL version '%s', assuming 8.0", version_str)
+                return 8, 0
+        except Exception as e:
+            log.warning("Failed to get MySQL version: %s", e)
+            cur.close()
+            # Fallback to assuming older version
+            return 8, 0
+
+    def show_master_status(self):
+        """Get binary log status with MySQL version compatibility"""
+        cur = self.cn.cursor()
+        
+        try:
+            # Check MySQL version to use appropriate command
+            major, minor = self.get_mysql_version()
+            
+            if major >= 8 and minor >= 4:
+                # MySQL 8.4+ uses SHOW BINARY LOG STATUS
+                cur.execute("SHOW BINARY LOG STATUS")
+                log.debug("Using SHOW BINARY LOG STATUS for MySQL %d.%d", major, minor)
+            else:
+                # MySQL 8.0 and earlier use SHOW MASTER STATUS
+                cur.execute("SHOW MASTER STATUS")
+                log.debug("Using SHOW MASTER STATUS for MySQL %d.%d", major, minor)
+            
+            row = cur.fetchone()
+            cur.close()
+            
+            if not row:
+                return None
+            
+            # Both commands return the same format: (file, position, ...)
+            return row[0], int(row[1])
+            
+        except Exception as e:
+            log.warning("Failed to get binary log status: %s", e)
+            cur.close()
             return None
-        return row[0], int(row[1])
 
     def start_repeatable_snapshot(self):
         try:
