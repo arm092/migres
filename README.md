@@ -217,6 +217,26 @@ docker compose up
 docker compose logs -f
 ```
 
+### Environment Variables Support
+
+All configuration options can be overridden using environment variables. This is useful for containerized deployments:
+
+```bash
+# MySQL configuration
+export MYSQL_HOST=mysql-server.example.com
+export MYSQL_PASSWORD=your-password
+
+# ClickHouse configuration  
+export CLICKHOUSE_HOST=clickhouse-server.example.com
+export CLICKHOUSE_PASSWORD=your-password
+
+# Notifications
+export NOTIFICATIONS_ENABLED=true
+export NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
+```
+
+See [Environment Variables Documentation](docs/ENVIRONMENT_VARIABLES.md) for complete list of supported variables.
+
 ## Testing
 
 The project includes a comprehensive test suite in the `test/` directory:
