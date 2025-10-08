@@ -36,9 +36,9 @@ class MySQLClient:
             cur.execute("SELECT VERSION()")
             version_str = cur.fetchone()[0]
             cur.close()
-            
+
             log.debug("MySQL version: %s", version_str)
-            
+
             # Parse version string (e.g., "8.4.0" or "8.0.35")
             try:
                 version_parts = version_str.split('.')
@@ -58,11 +58,11 @@ class MySQLClient:
     def show_master_status(self):
         """Get binary log status with MySQL version compatibility"""
         cur = self.cn.cursor()
-        
+
         try:
             # Check MySQL version to use appropriate command
             major, minor = self.get_mysql_version()
-            
+
             if major >= 8 and minor >= 4:
                 # MySQL 8.4+ uses SHOW BINARY LOG STATUS
                 cur.execute("SHOW BINARY LOG STATUS")
@@ -71,16 +71,16 @@ class MySQLClient:
                 # MySQL 8.0 and earlier use SHOW MASTER STATUS
                 cur.execute("SHOW MASTER STATUS")
                 log.debug("Using SHOW MASTER STATUS for MySQL %d.%d", major, minor)
-            
+
             row = cur.fetchone()
             cur.close()
-            
+
             if not row:
                 return None
-            
+
             # Both commands return the same format: (file, position, ...)
             return row[0], int(row[1])
-            
+
         except Exception as e:
             log.warning("Failed to get binary log status: %s", e)
             cur.close()
@@ -106,8 +106,9 @@ class MySQLClient:
         if include_list:
             res = []
             for t in include_list:
-                cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=%s AND table_name=%s",
-                            (self.cfg["database"], t))
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='%s' AND table_name='%s'",
+                    (self.cfg["database"], t))
                 if cur.fetchone()[0] > 0:
                     res.append(t)
                 else:
@@ -115,8 +116,9 @@ class MySQLClient:
             cur.close()
             return res
         else:
-            cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema=%s AND table_type='BASE TABLE'",
-                        (self.cfg["database"],))
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='%s' AND table_type='BASE TABLE'",
+                (self.cfg["database"],))
             rows = [r[0] for r in cur.fetchall()]
             cur.close()
             filtered = [t for t in rows if t not in exclude_list]
@@ -128,7 +130,7 @@ class MySQLClient:
         cur.execute("""
             SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s
+            WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'
             ORDER BY ORDINAL_POSITION
         """, (self.cfg["database"], table))
         cols = cur.fetchall()
@@ -136,7 +138,7 @@ class MySQLClient:
         cur.execute("""
             SELECT COLUMN_NAME
             FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND CONSTRAINT_NAME='PRIMARY'
+            WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' AND CONSTRAINT_NAME='PRIMARY'
             ORDER BY ORDINAL_POSITION
         """, (self.cfg["database"], table))
         pk_rows = cur.fetchall()
