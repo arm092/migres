@@ -103,9 +103,11 @@ class MySQLClient:
         """
         exclude_list = exclude_list or []
         cur = self.cn.cursor()
+        
         if include_list:
             res = []
             for t in include_list:
+                # Use parameterized queries - handles reserved keywords correctly
                 cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=%s AND table_name=%s",
                             (self.cfg["database"], t))
                 if cur.fetchone()[0] > 0:
@@ -125,6 +127,11 @@ class MySQLClient:
 
     def get_table_columns_and_pk(self, table):
         cur = self.cn.cursor(dictionary=True)
+        
+        log.debug("MySQL: Getting schema for table '%s'", table)
+        
+        # Use parameterized queries - this handles reserved keywords correctly
+        # MySQL automatically treats the parameterized values as strings, not identifiers
         cur.execute("""
             SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -132,6 +139,7 @@ class MySQLClient:
             ORDER BY ORDINAL_POSITION
         """, (self.cfg["database"], table))
         cols = cur.fetchall()
+        log.debug("MySQL: Found %d columns for table '%s'", len(cols), table)
 
         cur.execute("""
             SELECT COLUMN_NAME
@@ -141,6 +149,7 @@ class MySQLClient:
         """, (self.cfg["database"], table))
         pk_rows = cur.fetchall()
         pk = [r["COLUMN_NAME"] for r in pk_rows] if pk_rows else []
+        log.debug("MySQL: Found %d primary key columns for table '%s': %s", len(pk), table, pk)
 
         cur.close()
         return cols, pk
