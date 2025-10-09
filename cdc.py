@@ -834,18 +834,18 @@ def run_cdc(cfg):
     last_checkpoint_time = time.time()
     rows_since_checkpoint = 0
     last_queue_process_time = time.time()
+    last_heartbeat_time = time.time()
 
     try:
         while True:
             # Process queue every batch_delay_seconds
             now = time.time()
             if 0 < batch_delay_seconds <= (now - last_queue_process_time):
-                log.info("CDC: processing queue (time since last process: %.1fs, queue size: %d)", 
-                        now - last_queue_process_time, event_queue.size())
-                
                 # Get all events from queue
                 events = event_queue.get_all()
                 if events:
+                    log.info("CDC: processing queue (time since last process: %.1fs, queue size: %d)", 
+                            now - last_queue_process_time, len(events))
                     log.info("CDC: processing %d events from queue", len(events))
                     
                     # Group events by table and operation type
@@ -861,8 +861,7 @@ def run_cdc(cfg):
                         log.info("CDC: successfully processed %d rows from queue", rows_processed)
                     else:
                         log.info("CDC: no data events to process from queue")
-                else:
-                    log.info("CDC: queue is empty, no processing needed")
+                # Don't log anything when queue is empty - reduces noise
                 
                 last_queue_process_time = now
             
@@ -872,6 +871,12 @@ def run_cdc(cfg):
                 if event is None:
                     # No more events, sleep briefly and continue
                     time.sleep(0.1)
+                    
+                    # Log heartbeat every 60 seconds when idle
+                    if now - last_heartbeat_time >= 60:
+                        log.info("CDC: Running (idle) - position: %s:%s", stream.log_file, stream.log_pos)
+                        last_heartbeat_time = now
+                    
                     continue
             except Exception as e:
                 log.debug("CDC: no event available: %s", e)
@@ -886,7 +891,29 @@ def run_cdc(cfg):
                 if isinstance(schema, bytes):
                     schema = schema.decode('utf-8')
                 
-                log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
+                # Only log meaningful events, filter out noisy QueryEvents
+                should_log_event = True
+                if isinstance(event, QueryEvent):
+                    query_text = (getattr(event, "query", "") or "").lower().strip()
+                    # Filter out common non-actionable queries that create noise
+                    noisy_queries = [
+                        "begin", "commit", "rollback", "start transaction",
+                        "set", "select", "show", "flush", "reset",
+                        "set session", "set global", "set @@", "set @",
+                        "set names", "set character_set", "set collation",
+                        "set sql_mode", "set time_zone", "set autocommit",
+                        "set transaction", "set wait_timeout", "set interactive_timeout"
+                    ]
+                    should_log_event = not any(query_text.startswith(noisy) for noisy in noisy_queries)
+                    
+                    # Log filtered events at debug level for troubleshooting
+                    if not should_log_event:
+                        log.debug("CDC: Filtered out noisy QueryEvent: %s", query_text[:100])
+                
+                if should_log_event:
+                    log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
+                    # Update heartbeat when we process meaningful events
+                    last_heartbeat_time = time.time()
                 
                 # Debug: Log more details for data events
                 if hasattr(event, 'rows') and event.rows:
