@@ -128,31 +128,44 @@ class MySQLClient:
     def get_table_columns_and_pk(self, table):
         cur = self.cn.cursor(dictionary=True)
         
-        log.debug("MySQL: Getting schema for table '%s'", table)
+        log.info("MySQL: Getting schema for table '%s' in database '%s'", table, self.cfg["database"])
         
-        # Use parameterized queries - this handles reserved keywords correctly
-        # MySQL automatically treats the parameterized values as strings, not identifiers
-        cur.execute("""
-            SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s
-            ORDER BY ORDINAL_POSITION
-        """, (self.cfg["database"], table))
-        cols = cur.fetchall()
-        log.debug("MySQL: Found %d columns for table '%s'", len(cols), table)
+        try:
+            # Track MySQL queries
+            from cdc import _add_mysql_query
+            
+            # Use parameterized queries - this handles reserved keywords correctly
+            # MySQL automatically treats the parameterized values as strings, not identifiers
+            query1 = """
+                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s
+                ORDER BY ORDINAL_POSITION
+            """
+            _add_mysql_query(f"Query: {query1.strip()} | Params: ('{self.cfg['database']}', '{table}')", table)
+            cur.execute(query1, (self.cfg["database"], table))
+            cols = cur.fetchall()
+            log.info("MySQL: Found %d columns for table '%s': %s", len(cols), table, [c["COLUMN_NAME"] for c in cols])
 
-        cur.execute("""
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND CONSTRAINT_NAME='PRIMARY'
-            ORDER BY ORDINAL_POSITION
-        """, (self.cfg["database"], table))
-        pk_rows = cur.fetchall()
-        pk = [r["COLUMN_NAME"] for r in pk_rows] if pk_rows else []
-        log.debug("MySQL: Found %d primary key columns for table '%s': %s", len(pk), table, pk)
+            query2 = """
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND CONSTRAINT_NAME='PRIMARY'
+                ORDER BY ORDINAL_POSITION
+            """
+            _add_mysql_query(f"Query: {query2.strip()} | Params: ('{self.cfg['database']}', '{table}')", table)
+            cur.execute(query2, (self.cfg["database"], table))
+            pk_rows = cur.fetchall()
+            pk = [r["COLUMN_NAME"] for r in pk_rows] if pk_rows else []
+            log.info("MySQL: Found %d primary key columns for table '%s': %s", len(pk), table, pk)
 
-        cur.close()
-        return cols, pk
+            cur.close()
+            return cols, pk
+            
+        except Exception as e:
+            log.error("MySQL: Error getting schema for table '%s': %s", table, str(e))
+            cur.close()
+            raise
 
     def fetch_rows_by_pk(self, table, columns, pk_col, last_pk, batch):
         cur = self.cn.cursor()

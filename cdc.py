@@ -19,6 +19,52 @@ from pymysqlreplication.event import QueryEvent
 
 log = logging.getLogger(__name__)
 
+# Global query tracking pools
+mysql_query_pool = []
+clickhouse_query_pool = []
+
+
+def _add_mysql_query(query: str, table: str = None):
+    """Add a MySQL query to the tracking pool"""
+    global mysql_query_pool
+    mysql_query_pool.append({
+        "query": query,
+        "table": table,
+        "timestamp": time.time()
+    })
+    # Keep only last 10 queries to avoid memory issues
+    if len(mysql_query_pool) > 10:
+        mysql_query_pool.pop(0)
+
+
+def _add_clickhouse_query(query: str, table: str = None):
+    """Add a ClickHouse query to the tracking pool"""
+    global clickhouse_query_pool
+    clickhouse_query_pool.append({
+        "query": query,
+        "table": table,
+        "timestamp": time.time()
+    })
+    # Keep only last 10 queries to avoid memory issues
+    if len(clickhouse_query_pool) > 10:
+        clickhouse_query_pool.pop(0)
+
+
+def _clear_query_pools():
+    """Clear both query pools after successful operation"""
+    global mysql_query_pool, clickhouse_query_pool
+    mysql_query_pool.clear()
+    clickhouse_query_pool.clear()
+
+
+def _get_query_pools_for_error():
+    """Get current query pools for error reporting"""
+    global mysql_query_pool, clickhouse_query_pool
+    return {
+        "mysql_queries": mysql_query_pool.copy(),
+        "clickhouse_queries": clickhouse_query_pool.copy()
+    }
+
 
 def _serialize_event(event):
     try:
@@ -82,23 +128,21 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
                 retry_delay *= 2
     
     if not cols_meta or len(cols_meta) == 0:
-        log.error("CDC: CRITICAL ERROR - No columns found for table %s after %d attempts!", table, max_retries)
+        log.error("CDC: No columns found for table %s after %d attempts!", table, max_retries)
         
-        # Send critical notification for schema detection failure
+        # Send notification for schema detection failure
         notify_cdc_error(
-            error_type="CRITICAL: Schema Detection Failure",
+            error_type="Schema Detection Failure",
             table=table,
             error_message=f"Could not retrieve table schema after {max_retries} attempts",
             operation_details={
                 "Table": table,
                 "Attempts": max_retries,
-                "Error": "No columns found in INFORMATION_SCHEMA",
-                "Action Required": "CDC has stopped. Check if table exists and is accessible. Fix the issue and restart from the same position."
+                "Error": "No columns found in INFORMATION_SCHEMA"
             }
         )
         
-        # FAIL FAST: This is a critical error that should stop CDC
-        raise RuntimeError(f"CDC CRITICAL ERROR: No columns found for table {table} after {max_retries} attempts")
+        raise ValueError(f"No columns found for table {table} after {max_retries} attempts")
     
     # Build ClickHouse DDL
     ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, mig_cfg)
@@ -309,73 +353,8 @@ def _dump_failed_operations(operations: List[Dict], error_msg: str):
         log.error("Failed operations dumped to %s", filename)
         log.error("Dump contains %d operations with %d SQL queries", 
                  len(operations), len(dump_data["metadata"]["clickhouse_queries"]))
-        
-        # Also create a recovery script
-        recovery_script = _create_recovery_script(dump_data, timestamp)
-        if recovery_script:
-            recovery_filename = os.path.join(data_dir, f"recovery_script_{timestamp}.sh")
-            with open(recovery_filename, 'w', encoding='utf-8') as f:
-                f.write(recovery_script)
-            log.info("Recovery script created: %s", recovery_filename)
-            
     except Exception as e:
         log.exception("Failed to dump operations to file: %s", e)
-
-
-def _create_recovery_script(dump_data: Dict, timestamp: str) -> str:
-    """Create a recovery script for manual execution of failed operations"""
-    script_lines = [
-        "#!/bin/bash",
-        f"# CDC Recovery Script - Generated: {timestamp}",
-        f"# Error: {dump_data.get('error_message', 'Unknown error')}",
-        "",
-        "echo 'CDC Recovery Script'",
-        "echo '=================='",
-        "echo 'This script contains the SQL queries that failed during CDC processing.'",
-        "echo 'Review each query carefully before executing.'",
-        "echo ''",
-        ""
-    ]
-    
-    queries = dump_data.get("metadata", {}).get("clickhouse_queries", [])
-    if not queries:
-        script_lines.append("echo 'No SQL queries to recover.'")
-        return "\n".join(script_lines)
-    
-    for i, query_info in enumerate(queries):
-        schema = query_info.get("schema", "unknown")
-        table = query_info.get("table", "unknown")
-        event_type = query_info.get("event_type", "unknown")
-        sql_query = query_info.get("sql_query", "")
-        error_details = query_info.get("error_details", "No error details")
-        
-        script_lines.extend([
-            f"echo 'Query {i+1}: {event_type} on {schema}.{table}'",
-            f"echo 'Error: {error_details}'",
-            f"echo 'SQL:'",
-            f"echo '{sql_query}'",
-            "echo ''",
-            "read -p 'Execute this query? (y/n): ' -n 1 -r",
-            "echo ''",
-            "if [[ $REPLY =~ ^[Yy]$ ]]; then",
-            f"    echo 'Executing query {i+1}...'",
-            f"    # Add your ClickHouse client command here",
-            f"    # clickhouse-client --query=\"{sql_query}\"",
-            "    echo 'Query executed.'",
-            "else",
-            f"    echo 'Skipping query {i+1}.'",
-            "fi",
-            "echo ''",
-            "echo '---'",
-            "echo ''"
-        ])
-    
-    script_lines.extend([
-        "echo 'Recovery script completed.'",
-        "echo 'Restart CDC after fixing any issues.'"
-    ])
-    
-    return "\n".join(script_lines)
 
 
 def _generate_real_sql_query(operation: Dict, schema: str, table: str, event_type: str) -> str:
@@ -540,9 +519,9 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
     """
     Process grouped events efficiently.
     Returns total number of rows processed.
-    FAILS FAST: Any error will raise an exception to stop CDC processing.
     """
     total_rows = 0
+    failed_operations = []
     
     for (schema, table, event_type), events in groups.items():
         try:
@@ -572,19 +551,22 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
             rows_processed = _process_batched_event(combined_event, mysql_client, ch, table_cache, mig_cfg)
             total_rows += rows_processed
             
+            # Clear query pools after successful processing
+            _clear_query_pools()
+            
             log.info("CDC: successfully processed %d rows for %s.%s (%s)", rows_processed, schema, table, event_type)
             
         except Exception as e:
-            log.error("CDC: CRITICAL ERROR - Failed to process group %s.%s (%s): %s", schema, table, event_type, str(e))
-            
-            # Collect failed operation details for notification
+            log.exception("CDC: failed to process group %s.%s (%s)", schema, table, event_type)
+            # Collect failed operation details
             operation = {
                 "schema": schema,
                 "table": table,
                 "event_type": event_type,
                 "event_count": len(events),
                 "error": str(e),
-                "events": []
+                "events": [],
+                "query_pools": _get_query_pools_for_error()  # Include the actual queries that were being executed
             }
             
             # Add event details (limited to avoid huge files)
@@ -600,28 +582,46 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
                 except Exception:
                     pass
             
-            # Dump failed operations for manual review
-            _dump_failed_operations([operation], f"CRITICAL: Failed to process {event_type} events")
+            failed_operations.append(operation)
+    
+    # Dump failed operations if any
+    if failed_operations:
+        _dump_failed_operations(failed_operations, "Failed to process grouped events")
+        
+        # Send notification for failed operations
+        for operation in failed_operations:
+            schema = operation.get("schema", "unknown")
+            table = operation.get("table", "unknown")
+            error = operation.get("error", "Unknown error")
+            event_count = operation.get("event_count", 0)
+            query_pools = operation.get("query_pools", {})
             
-            # Generate and include SQL query in notification
-            sql_query = _generate_real_sql_query(operation, schema, table, event_type)
+            # Format query pools for notification
+            mysql_queries = query_pools.get("mysql_queries", [])
+            clickhouse_queries = query_pools.get("clickhouse_queries", [])
             
-            # Send critical error notification with SQL query
+            operation_details = {
+                "Event Count": event_count,
+                "Event Type": operation.get("event_type", "unknown"),
+                "Error": error
+            }
+            
+            # Add MySQL queries if any
+            if mysql_queries:
+                mysql_query_text = "\n".join([f"- {q['query']}" for q in mysql_queries[-3:]])  # Last 3 queries
+                operation_details["Recent MySQL Queries"] = mysql_query_text
+            
+            # Add ClickHouse queries if any
+            if clickhouse_queries:
+                ch_query_text = "\n".join([f"- {q['query']}" for q in clickhouse_queries[-3:]])  # Last 3 queries
+                operation_details["Recent ClickHouse Queries"] = ch_query_text
+            
             notify_cdc_error(
-                error_type="CRITICAL: CDC Processing Failed",
+                error_type="Processing Error",
                 table=f"{schema}.{table}",
-                error_message=f"Failed to process {len(events)} {event_type} events: {str(e)}",
-                operation_details={
-                    "Event Count": len(events),
-                    "Event Type": event_type,
-                    "Error": str(e),
-                    "SQL Query": sql_query,
-                    "Action Required": "CDC has stopped. Fix the issue and restart from the same position."
-                }
+                error_message=f"Failed to process {event_count} events: {error}",
+                operation_details=operation_details
             )
-            
-            # FAIL FAST: Raise exception to stop CDC processing
-            raise RuntimeError(f"CDC CRITICAL ERROR: Failed to process {event_type} events for {schema}.{table}: {str(e)}")
     
     return total_rows
 
@@ -677,18 +677,13 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
         
         try:
             ch.insert_rows(table, insert_cols, rows)
-        except Exception as e:
+        except Exception:
             # If insert fails due to missing column(s), refresh schema and retry once
-            log.error("CDC: insert failed for %s, refreshing schema and retrying once: %s", table, str(e))
-            try:
-                insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                # Retry the insert with updated schema
-                ch.insert_rows(table, insert_cols, rows)
-            except Exception as retry_e:
-                # If retry also fails, this is a critical error - fail fast
-                log.error("CDC: CRITICAL ERROR - Insert retry failed for %s: %s", table, str(retry_e))
-                raise RuntimeError(f"CDC CRITICAL ERROR: Failed to insert data into {table} after schema refresh: {str(retry_e)}")
+            log.exception("CDC: insert failed, refreshing schema and retrying once for %s", table)
+            insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+            table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+            # Retry the insert with updated schema
+            ch.insert_rows(table, insert_cols, rows)
         
         log.info("CDC: inserted %d row(s) into %s (INSERT)", len(rows), table)
         return len(rows)
@@ -728,17 +723,12 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
         
         try:
             ch.insert_rows(table, insert_cols, rows)
-        except Exception as e:
-            log.error("CDC: insert failed for %s (UPDATE), refreshing schema and retrying once: %s", table, str(e))
-            try:
-                insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                # Retry the insert with updated schema
-                ch.insert_rows(table, insert_cols, rows)
-            except Exception as retry_e:
-                # If retry also fails, this is a critical error - fail fast
-                log.error("CDC: CRITICAL ERROR - Update insert retry failed for %s: %s", table, str(retry_e))
-                raise RuntimeError(f"CDC CRITICAL ERROR: Failed to update data in {table} after schema refresh: {str(retry_e)}")
+        except Exception:
+            log.exception("CDC: insert failed, refreshing schema and retrying once for %s", table)
+            insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+            table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+            # Retry the insert with updated schema
+            ch.insert_rows(table, insert_cols, rows)
         
         log.info("CDC: inserted %d row(s) into %s (UPDATE->upsert)", len(rows), table)
         return len(rows)
@@ -754,17 +744,12 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
         
         try:
             ch.insert_rows(table, insert_cols, rows)
-        except Exception as e:
-            log.error("CDC: insert failed for %s (DELETE), refreshing schema and retrying once: %s", table, str(e))
-            try:
-                insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                # Retry the insert with updated schema
-                ch.insert_rows(table, insert_cols, rows)
-            except Exception as retry_e:
-                # If retry also fails, this is a critical error - fail fast
-                log.error("CDC: CRITICAL ERROR - Delete insert retry failed for %s: %s", table, str(retry_e))
-                raise RuntimeError(f"CDC CRITICAL ERROR: Failed to delete data in {table} after schema refresh: {str(retry_e)}")
+        except Exception:
+            log.exception("CDC: insert failed, refreshing (deleting) schema and retrying once for %s", table)
+            insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+            table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+            # Retry the insert with updated schema
+            ch.insert_rows(table, insert_cols, rows)
         
         log.info("CDC: inserted %d tombstone row(s) into %s (DELETE)", len(rows), table)
         return len(rows)
@@ -849,18 +834,18 @@ def run_cdc(cfg):
     last_checkpoint_time = time.time()
     rows_since_checkpoint = 0
     last_queue_process_time = time.time()
-    last_heartbeat_time = time.time()
 
     try:
         while True:
             # Process queue every batch_delay_seconds
             now = time.time()
             if 0 < batch_delay_seconds <= (now - last_queue_process_time):
+                log.info("CDC: processing queue (time since last process: %.1fs, queue size: %d)", 
+                        now - last_queue_process_time, event_queue.size())
+                
                 # Get all events from queue
                 events = event_queue.get_all()
                 if events:
-                    log.info("CDC: processing queue (time since last process: %.1fs, queue size: %d)", 
-                            now - last_queue_process_time, len(events))
                     log.info("CDC: processing %d events from queue", len(events))
                     
                     # Group events by table and operation type
@@ -876,7 +861,8 @@ def run_cdc(cfg):
                         log.info("CDC: successfully processed %d rows from queue", rows_processed)
                     else:
                         log.info("CDC: no data events to process from queue")
-                # Don't log anything when queue is empty - reduces noise
+                else:
+                    log.info("CDC: queue is empty, no processing needed")
                 
                 last_queue_process_time = now
             
@@ -886,12 +872,6 @@ def run_cdc(cfg):
                 if event is None:
                     # No more events, sleep briefly and continue
                     time.sleep(0.1)
-                    
-                    # Log heartbeat every 60 seconds when idle
-                    if now - last_heartbeat_time >= 60:
-                        log.info("CDC: Running (idle) - position: %s:%s", stream.log_file, stream.log_pos)
-                        last_heartbeat_time = now
-                    
                     continue
             except Exception as e:
                 log.debug("CDC: no event available: %s", e)
@@ -906,29 +886,7 @@ def run_cdc(cfg):
                 if isinstance(schema, bytes):
                     schema = schema.decode('utf-8')
                 
-                # Only log meaningful events, filter out noisy QueryEvents
-                should_log_event = True
-                if isinstance(event, QueryEvent):
-                    query_text = (getattr(event, "query", "") or "").lower().strip()
-                    # Filter out common non-actionable queries that create noise
-                    noisy_queries = [
-                        "begin", "commit", "rollback", "start transaction",
-                        "set", "select", "show", "flush", "reset",
-                        "set session", "set global", "set @@", "set @",
-                        "set names", "set character_set", "set collation",
-                        "set sql_mode", "set time_zone", "set autocommit",
-                        "set transaction", "set wait_timeout", "set interactive_timeout"
-                    ]
-                    should_log_event = not any(query_text.startswith(noisy) for noisy in noisy_queries)
-                    
-                    # Log filtered events at debug level for troubleshooting
-                    if not should_log_event:
-                        log.debug("CDC: Filtered out noisy QueryEvent: %s", query_text[:100])
-                
-                if should_log_event:
-                    log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
-                    # Update heartbeat when we process meaningful events
-                    last_heartbeat_time = time.time()
+                log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
                 
                 # Debug: Log more details for data events
                 if hasattr(event, 'rows') and event.rows:
@@ -1093,41 +1051,14 @@ def run_cdc(cfg):
                         os.makedirs(os.path.dirname(checkpoint_file) or ".", exist_ok=True)
                         with open(checkpoint_file, "w", encoding="utf-8") as fp:
                             json.dump({"binlog_file": f, "binlog_pos": p}, fp, indent=2)
-                        log.info("CDC: Checkpoint saved - position: %s:%s", f, p)
                     except Exception:
                         log.exception("Failed to write checkpoint file")
                     rows_since_checkpoint = 0
                     last_checkpoint_time = now
 
-            except Exception as e:
-                log.error("CDC: CRITICAL ERROR in main loop: %s", str(e))
-                
-                # Save current position before stopping
-                try:
-                    f, p = stream.log_file, stream.log_pos
-                    state.set_binlog(f, p)
-                    import os, json
-                    os.makedirs(os.path.dirname(checkpoint_file) or ".", exist_ok=True)
-                    with open(checkpoint_file, "w", encoding="utf-8") as fp:
-                        json.dump({"binlog_file": f, "binlog_pos": p}, fp, indent=2)
-                    log.info("CDC: Emergency checkpoint saved before shutdown - position: %s:%s", f, p)
-                except Exception as checkpoint_e:
-                    log.error("CDC: Failed to save emergency checkpoint: %s", str(checkpoint_e))
-                
-                # Send critical error notification
-                notify_cdc_error(
-                    error_type="CRITICAL: CDC Main Loop Error",
-                    table="CDC_PROCESS",
-                    error_message=f"CDC main loop encountered critical error: {str(e)}",
-                    operation_details={
-                        "Error": str(e),
-                        "Current Position": f"{stream.log_file}:{stream.log_pos}",
-                        "Action Required": "CDC has stopped. Fix the issue and restart from the same position."
-                    }
-                )
-                
-                # Re-raise to stop CDC processing
-                raise
+            except Exception:
+                log.exception("Error handling binlog event")
+                time.sleep(1)
     finally:
         # Send shutdown notification
         notify_cdc_shutdown("CDC process stopped")

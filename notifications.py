@@ -116,14 +116,8 @@ class TeamsNotification:
         # Add details section if provided
         if details:
             details_text = "**Details:**\n"
-            sql_query = None
-            
             for key, value in details.items():
-                if key == "SQL Query" and value:
-                    # Store SQL query separately for special formatting
-                    sql_query = value
-                    continue
-                elif isinstance(value, (dict, list)):
+                if isinstance(value, (dict, list)):
                     value = json.dumps(value, indent=2)
                 details_text += f"- **{key}:** {value}\n"
             
@@ -133,22 +127,6 @@ class TeamsNotification:
                 "wrap": True,
                 "spacing": "Medium"
             })
-            
-            # Add SQL query in a separate, well-formatted section if present
-            if sql_query:
-                card["attachments"][0]["content"]["body"].append({
-                    "type": "TextBlock",
-                    "text": "**SQL Query that caused the error:**",
-                    "weight": "Bolder",
-                    "spacing": "Medium"
-                })
-                card["attachments"][0]["content"]["body"].append({
-                    "type": "TextBlock",
-                    "text": f"```sql\n{sql_query}\n```",
-                    "wrap": True,
-                    "spacing": "Small",
-                    "fontType": "Monospace"
-                })
         
         return card
     
@@ -221,13 +199,10 @@ class TeamsNotification:
         if operation_details:
             details.update(operation_details)
             
-        # If this is a critical error, use CRITICAL level
-        level = NotificationLevel.CRITICAL if "CRITICAL" in error_type else NotificationLevel.ERROR
-            
         return self.send_notification(
             title=title,
             message=message,
-            level=level,
+            level=NotificationLevel.ERROR,
             details=details,
             notification_type="cdc_error"
         )

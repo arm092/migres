@@ -36,6 +36,12 @@ class CHClient:
         )
 
     def execute(self, sql, params=None):
+        # Track ClickHouse queries
+        try:
+            from cdc import _add_clickhouse_query
+            _add_clickhouse_query(f"Query: {sql} | Params: {params}")
+        except ImportError:
+            pass  # If cdc module not available, just continue
         return self.client.execute(sql, params or None)
 
     def insert_rows(self, table, columns, rows):
@@ -48,6 +54,12 @@ class CHClient:
         cols = ",".join([f"`{c}`" for c in columns])
         sql = f"INSERT INTO `{self.db}`.`{table}` ({cols}) VALUES"
         
+        # Track ClickHouse queries
+        try:
+            from cdc import _add_clickhouse_query
+            _add_clickhouse_query(f"INSERT INTO {self.db}.{table} ({cols}) VALUES [with {len(rows)} rows]", table)
+        except ImportError:
+            pass  # If cdc module not available, just continue
         
         try:
             self.client.execute(sql, rows)
