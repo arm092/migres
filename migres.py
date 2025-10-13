@@ -5,7 +5,7 @@ import sys
 from config import load_config
 from logger import setup_logging
 from snapshot import run_snapshot
-from cdc import run_cdc
+from cdc import run_cdc, CriticalCDCError
 
 def main():
     ap = argparse.ArgumentParser(prog="migres")
@@ -40,6 +40,9 @@ def main():
                 logging.info("CDC: initial snapshot completed, starting binlog streaming...")
 
             run_cdc(cfg)
+        except CriticalCDCError as e:
+            logging.critical("CDC failed with critical error: %s", str(e))
+            sys.exit(1)  # Exit with error code 1 for critical errors
         except Exception:
             logging.exception("CDC failed:")
             sys.exit(3)

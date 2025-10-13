@@ -3,6 +3,7 @@ import time
 import threading
 import queue
 import json
+import sys
 from datetime import datetime
 from typing import Dict, List
 from collections import defaultdict
@@ -18,6 +19,14 @@ from pymysqlreplication.row_event import WriteRowsEvent, UpdateRowsEvent, Delete
 from pymysqlreplication.event import QueryEvent
 
 log = logging.getLogger(__name__)
+
+
+class CriticalCDCError(Exception):
+    """
+    Critical CDC error that should cause the process to exit with error code.
+    This prevents binlog position advancement and ensures Kubernetes restarts the process.
+    """
+    pass
 
 # Global query tracking pools
 mysql_query_pool = []
@@ -99,13 +108,29 @@ def _build_insertable(cols_meta, pk_cols, mig_cfg):
 def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: str, mig_cfg):
     log.info("CDC: _ensure_table_and_columns called for table: %s", table)
     
-    # Retry mechanism for INFORMATION_SCHEMA timing issues
+    # Retry mechanism for INFORMATION_SCHEMA timing issues and connection problems
     cols_meta, pk_cols = None, None
     max_retries = 5
     retry_delay = 0.1  # Start with 100ms delay
+    last_error = None
     
     for attempt in range(max_retries):
         try:
+            # Check if MySQL connection is still alive
+            if not mysql_client.cn or not mysql_client.cn.is_connected():
+                log.warning("CDC: MySQL connection lost, attempting to reconnect (attempt %d)", attempt + 1)
+                try:
+                    mysql_client.connect()
+                    log.info("CDC: MySQL connection restored")
+                except Exception as conn_e:
+                    log.error("CDC: Failed to reconnect to MySQL: %s", conn_e)
+                    last_error = conn_e
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    continue
+            
             cols_meta, pk_cols = mysql_client.get_table_columns_and_pk(table)
             log.info("CDC: MySQL schema for %s (attempt %d) - columns: %s, pk: %s", 
                      table, attempt + 1, [c["COLUMN_NAME"] for c in cols_meta], pk_cols)
@@ -121,6 +146,7 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
         except Exception as e:
+            last_error = e
             log.warning("CDC: Error getting schema for %s (attempt %d): %s", table, attempt + 1, e)
             if attempt < max_retries - 1:
                 import time
@@ -128,21 +154,26 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
                 retry_delay *= 2
     
     if not cols_meta or len(cols_meta) == 0:
-        log.error("CDC: No columns found for table %s after %d attempts!", table, max_retries)
+        error_msg = f"No columns found for table {table} after {max_retries} attempts"
+        if last_error:
+            error_msg += f". Last error: {last_error}"
+        
+        log.error("CDC: %s", error_msg)
         
         # Send notification for schema detection failure
         notify_cdc_error(
             error_type="Schema Detection Failure",
             table=table,
-            error_message=f"Could not retrieve table schema after {max_retries} attempts",
+            error_message=error_msg,
             operation_details={
                 "Table": table,
                 "Attempts": max_retries,
-                "Error": "No columns found in INFORMATION_SCHEMA"
+                "Last Error": str(last_error) if last_error else "No columns found in INFORMATION_SCHEMA",
+                "MySQL Connection": "Connected" if mysql_client.cn and mysql_client.cn.is_connected() else "Disconnected"
             }
         )
         
-        raise ValueError(f"No columns found for table {table} after {max_retries} attempts")
+        raise ValueError(error_msg)
     
     # Build ClickHouse DDL
     ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, mig_cfg)
@@ -324,7 +355,8 @@ def _dump_failed_operations(operations: List[Dict], error_msg: str):
         "metadata": {
             "dump_reason": "CDC failed to process operations",
             "suggested_action": "Review error details and retry operations manually",
-            "clickhouse_queries": []
+            "clickhouse_queries": [],
+            "query_pools": _get_query_pools_for_error()  # Include current query pools
         }
     }
     
@@ -519,6 +551,7 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
     """
     Process grouped events efficiently.
     Returns total number of rows processed.
+    Raises CriticalCDCError if any operation fails to prevent binlog position advancement.
     """
     total_rows = 0
     failed_operations = []
@@ -551,9 +584,6 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
             rows_processed = _process_batched_event(combined_event, mysql_client, ch, table_cache, mig_cfg)
             total_rows += rows_processed
             
-            # Clear query pools after successful processing
-            _clear_query_pools()
-            
             log.info("CDC: successfully processed %d rows for %s.%s (%s)", rows_processed, schema, table, event_type)
             
         except Exception as e:
@@ -584,7 +614,7 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
             
             failed_operations.append(operation)
     
-    # Dump failed operations if any
+    # If any operations failed, dump them and raise critical error to prevent binlog advancement
     if failed_operations:
         _dump_failed_operations(failed_operations, "Failed to process grouped events")
         
@@ -622,6 +652,12 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
                 error_message=f"Failed to process {event_count} events: {error}",
                 operation_details=operation_details
             )
+        
+        # Raise critical error to prevent binlog position advancement
+        raise CriticalCDCError(f"Failed to process {len(failed_operations)} operation groups. Binlog position will not advance.")
+    
+    # Clear query pools only after ALL operations in the group are successful
+    _clear_query_pools()
     
     return total_rows
 
@@ -639,6 +675,7 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
     
     # Ensure table exists in CH and columns are up-to-date
     if table not in table_cache:
+        log.info("CDC: Table %s not in cache, ensuring table and columns", table)
         insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
         table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
     
@@ -646,28 +683,40 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
     
     if isinstance(event, WriteRowsEvent) or event.__class__.__name__ == "WriteRowsEvent":
         # Handle INSERT events
-        # If event contains columns unknown to our cache, refresh schema
+        # Only refresh schema if we detect truly new columns (not just missing columns in the event)
+        # This avoids unnecessary INFORMATION_SCHEMA queries for regular data events
         try:
-            sample = event.rows[0]["values"] if event.rows else {}
-            incoming_cols = set(sample.keys())
-            cached_cols = set(insert_cols[:-2])
-            if incoming_cols and not incoming_cols.issubset(cached_cols):
-                log.info("CDC: detected new columns for %s, refreshing (writing) schema...", table)
-                insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                cached_cols = set(insert_cols[:-2])
-                # If still missing (information_schema lag), retry a few times
-                if incoming_cols and not incoming_cols.issubset(cached_cols):
-                    import time as _t
-                    for _ in range(10):
-                        insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                        table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                        cached_cols = set(insert_cols[:-2])
-                        if incoming_cols.issubset(cached_cols):
-                            break
-                        _t.sleep(0.1)
+            if event.rows:
+                sample = event.rows[0]["values"]
+                incoming_cols = set(sample.keys())
+                cached_cols = set(insert_cols[:-2])  # Exclude CDC metadata columns
+                
+                # Only refresh if we have columns that are NOT in our cache
+                # This indicates a real schema change, not just missing columns in the event
+                new_cols = incoming_cols - cached_cols
+                if new_cols:
+                    log.info("CDC: detected new columns %s for %s, refreshing schema...", new_cols, table)
+                    insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+                    table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+                    cached_cols = set(insert_cols[:-2])
+                    
+                    # If still missing (information_schema lag), retry a few times
+                    new_cols_after_refresh = incoming_cols - cached_cols
+                    if new_cols_after_refresh:
+                        log.warning("CDC: columns %s still missing after schema refresh, retrying...", new_cols_after_refresh)
+                        import time as _t
+                        for retry in range(3):  # Reduced retries from 10 to 3
+                            _t.sleep(0.2)  # Increased delay
+                            insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+                            table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+                            cached_cols = set(insert_cols[:-2])
+                            new_cols_after_refresh = incoming_cols - cached_cols
+                            if not new_cols_after_refresh:
+                                break
+                        if new_cols_after_refresh:
+                            log.error("CDC: columns %s still missing after retries, proceeding with available columns", new_cols_after_refresh)
         except (AttributeError, KeyError, TypeError):
-            log.exception("CDC: failed to auto-refresh schema on INSERT; proceeding with current cache")
+            log.exception("CDC: failed to check schema on INSERT; proceeding with current cache")
         
         rows = []
         for row in event.rows:
@@ -690,28 +739,39 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
     
     elif isinstance(event, UpdateRowsEvent) or event.__class__.__name__ == "UpdateRowsEvent":
         # Handle UPDATE events
-        # Refresh if new columns appear in after_values
+        # Only refresh schema if we detect truly new columns in after_values
+        # This avoids unnecessary INFORMATION_SCHEMA queries for regular data events
         try:
-            sample = event.rows[0]["after_values"] if event.rows else {}
-            incoming_cols = set(sample.keys())
-            cached_cols = set(insert_cols[:-2])
-            if incoming_cols and not incoming_cols.issubset(cached_cols):
-                log.info("CDC: detected new columns for %s, refreshing (updating) schema...", table)
-                insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                cached_cols = set(insert_cols[:-2])
-                # If still missing (information_schema lag), retry a few times
-                if incoming_cols and not incoming_cols.issubset(cached_cols):
-                    import time as _t
-                    for _ in range(10):
-                        insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
-                        table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                        cached_cols = set(insert_cols[:-2])
-                        if incoming_cols.issubset(cached_cols):
-                            break
-                        _t.sleep(0.1)
+            if event.rows:
+                sample = event.rows[0]["after_values"]
+                incoming_cols = set(sample.keys())
+                cached_cols = set(insert_cols[:-2])  # Exclude CDC metadata columns
+                
+                # Only refresh if we have columns that are NOT in our cache
+                new_cols = incoming_cols - cached_cols
+                if new_cols:
+                    log.info("CDC: detected new columns %s for %s, refreshing schema...", new_cols, table)
+                    insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+                    table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+                    cached_cols = set(insert_cols[:-2])
+                    
+                    # If still missing (information_schema lag), retry a few times
+                    new_cols_after_refresh = incoming_cols - cached_cols
+                    if new_cols_after_refresh:
+                        log.warning("CDC: columns %s still missing after schema refresh, retrying...", new_cols_after_refresh)
+                        import time as _t
+                        for retry in range(3):  # Reduced retries from 10 to 3
+                            _t.sleep(0.2)  # Increased delay
+                            insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
+                            table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
+                            cached_cols = set(insert_cols[:-2])
+                            new_cols_after_refresh = incoming_cols - cached_cols
+                            if not new_cols_after_refresh:
+                                break
+                        if new_cols_after_refresh:
+                            log.error("CDC: columns %s still missing after retries, proceeding with available columns", new_cols_after_refresh)
         except Exception:
-            log.exception("CDC: failed to auto-refresh schema on UPDATE; proceeding with current cache")
+            log.exception("CDC: failed to check schema on UPDATE; proceeding with current cache")
         
         rows = []
         for row in event.rows:
@@ -856,9 +916,34 @@ def run_cdc(cfg):
                     groups = event_grouper.get_groups()
                     if groups:
                         log.info("CDC: processing %d groups", len(groups))
-                        rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
-                        rows_since_checkpoint += rows_processed
-                        log.info("CDC: successfully processed %d rows from queue", rows_processed)
+                        try:
+                            rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
+                            rows_since_checkpoint += rows_processed
+                            log.info("CDC: successfully processed %d rows from queue", rows_processed)
+                        except CriticalCDCError as e:
+                            log.critical("CDC: Critical error occurred - %s", str(e))
+                            # Send critical error notification with query pools
+                            query_pools = _get_query_pools_for_error()
+                            operation_details = {
+                                "Error Type": "CriticalCDCError",
+                                "Action": "Process exiting with error code",
+                                "Reason": "Binlog position will not advance to prevent data loss"
+                            }
+                            
+                            # Add query pools to notification
+                            if query_pools.get("mysql_queries"):
+                                operation_details["Recent MySQL Queries"] = "\n".join([f"- {q['query']}" for q in query_pools["mysql_queries"][-3:]])
+                            if query_pools.get("clickhouse_queries"):
+                                operation_details["Recent ClickHouse Queries"] = "\n".join([f"- {q['query']}" for q in query_pools["clickhouse_queries"][-3:]])
+                            
+                            notify_cdc_error(
+                                error_type="Critical CDC Error",
+                                table="CDC Process",
+                                error_message=f"Process will exit to prevent data loss: {str(e)}",
+                                operation_details=operation_details
+                            )
+                            # Exit with error code to trigger Kubernetes restart
+                            sys.exit(1)
                     else:
                         log.info("CDC: no data events to process from queue")
                 # Don't log anything when queue is empty - reduces noise
@@ -1065,8 +1150,36 @@ def run_cdc(cfg):
                     row_count = len(getattr(event, 'rows', []))
                     log.info("CDC: processing event immediately for %s.%s (%s) with %d rows", 
                             schema, table, event.__class__.__name__, row_count)
-                    rows_processed = _process_batched_event(event, mysql_client, ch, table_cache, mig_cfg)
-                    rows_since_checkpoint += rows_processed
+                    try:
+                        rows_processed = _process_batched_event(event, mysql_client, ch, table_cache, mig_cfg)
+                        rows_since_checkpoint += rows_processed
+                        # Clear query pools after successful immediate processing
+                        _clear_query_pools()
+                    except Exception as e:
+                        log.critical("CDC: Critical error processing event immediately - %s", str(e))
+                        # Send critical error notification with query pools
+                        query_pools = _get_query_pools_for_error()
+                        operation_details = {
+                            "Error Type": "CriticalCDCError",
+                            "Event Type": event.__class__.__name__,
+                            "Action": "Process exiting with error code",
+                            "Reason": "Binlog position will not advance to prevent data loss"
+                        }
+                        
+                        # Add query pools to notification
+                        if query_pools.get("mysql_queries"):
+                            operation_details["Recent MySQL Queries"] = "\n".join([f"- {q['query']}" for q in query_pools["mysql_queries"][-3:]])
+                        if query_pools.get("clickhouse_queries"):
+                            operation_details["Recent ClickHouse Queries"] = "\n".join([f"- {q['query']}" for q in query_pools["clickhouse_queries"][-3:]])
+                        
+                        notify_cdc_error(
+                            error_type="Critical CDC Error",
+                            table=f"{schema}.{table}",
+                            error_message=f"Process will exit to prevent data loss: {str(e)}",
+                            operation_details=operation_details
+                        )
+                        # Exit with error code to trigger Kubernetes restart
+                        sys.exit(1)
 
                 # periodic checkpoint
                 now = time.time()
@@ -1083,6 +1196,9 @@ def run_cdc(cfg):
                     rows_since_checkpoint = 0
                     last_checkpoint_time = now
 
+            except CriticalCDCError:
+                # Re-raise CriticalCDCError to ensure process exits
+                raise
             except Exception:
                 log.exception("Error handling binlog event")
                 time.sleep(1)
@@ -1099,8 +1215,33 @@ def run_cdc(cfg):
                     event_grouper.add_event(event)
                 groups = event_grouper.get_groups()
                 if groups:
-                    rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
-                    log.info("CDC: processed %d final rows from queue", rows_processed)
+                    try:
+                        rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
+                        log.info("CDC: processed %d final rows from queue", rows_processed)
+                    except CriticalCDCError as e:
+                        log.critical("CDC: Critical error in final processing - %s", str(e))
+                        # Send critical error notification with query pools
+                        query_pools = _get_query_pools_for_error()
+                        operation_details = {
+                            "Error Type": "CriticalCDCError",
+                            "Action": "Process exiting with error code",
+                            "Reason": "Binlog position will not advance to prevent data loss"
+                        }
+                        
+                        # Add query pools to notification
+                        if query_pools.get("mysql_queries"):
+                            operation_details["Recent MySQL Queries"] = "\n".join([f"- {q['query']}" for q in query_pools["mysql_queries"][-3:]])
+                        if query_pools.get("clickhouse_queries"):
+                            operation_details["Recent ClickHouse Queries"] = "\n".join([f"- {q['query']}" for q in query_pools["clickhouse_queries"][-3:]])
+                        
+                        notify_cdc_error(
+                            error_type="Critical CDC Error",
+                            table="CDC Process",
+                            error_message=f"Process will exit to prevent data loss: {str(e)}",
+                            operation_details=operation_details
+                        )
+                        # Exit with error code to trigger Kubernetes restart
+                        sys.exit(1)
         
         try:
             stream.close()
