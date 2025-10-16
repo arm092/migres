@@ -168,8 +168,7 @@ migration:
   ddl_engine: "ReplacingMergeTree"
   
   # Timezone configuration for datetime/timestamp columns
-  mysql_timezone: "Europe/Moscow"      # Set to your MySQL server timezone
-  clickhouse_timezone: "Europe/Moscow" # Set to desired ClickHouse timezone
+  clickhouse_timezone: "Asia/Yerevan" # Set to desired ClickHouse timezone
   
   # CDC-specific settings
   cdc:
@@ -392,14 +391,9 @@ DROP TABLE old_table;
 - Verify MySQL/ClickHouse connectivity
 
 **5. Timezone issues with datetime columns:**
-- Configure `mysql_timezone` and `clickhouse_timezone` in config.yml
-- Ensure both are set to the same timezone for consistency
+- Configure `clickhouse_timezone` in config.yml
+- Ensure it matches your MySQL server timezone for consistency
 - Use `DateTime64(3, 'timezone')` for proper timezone handling
-
-**6. Duplicate inserts in ClickHouse:**
-- This was a bug that has been fixed in recent versions
-- Each MySQL event now results in exactly one ClickHouse insert
-- Use `SELECT * FROM table FINAL` to see deduplicated results
 
 ### Debug Mode
 

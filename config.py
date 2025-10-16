@@ -88,7 +88,6 @@ def _apply_env_overrides(cfg):
         "MIGRATION_MODE": "mode",
         "MIGRATION_BATCH_ROWS": "batch_rows",
         "MIGRATION_WORKERS": "workers",
-        "MIGRATION_MYSQL_TIMEZONE": "mysql_timezone",
         "MIGRATION_CLICKHOUSE_TIMEZONE": "clickhouse_timezone"
     }
     
