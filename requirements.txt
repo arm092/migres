@@ -1,5 +1,5 @@
 clickhouse-driver==0.2.9
-mysql-connector-python==9.4.0
+mysql-connector-python==8.0.33
 PyYAML==6.0.2
-mysql-replication==1.0.9
+mysql-replication==0.46
 requests==2.32.5
