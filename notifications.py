@@ -3,12 +3,12 @@ MS Teams Notification System for CDC
 Sends notifications to MS Teams channels for errors, warnings, and important events
 """
 
-import logging
 import json
-import requests
+import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Any
 from enum import Enum
+from typing import Dict, Optional
+import requests
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +19,77 @@ class NotificationLevel(Enum):
     WARNING = "warning"
     ERROR = "error"
     CRITICAL = "critical"
+
+
+def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
+                          details: Optional[Dict] = None) -> Dict:
+    """Create MS Teams adaptive card payload"""
+
+    # Color coding based on level
+    color_map = {
+        NotificationLevel.INFO: "00FF00",      # Green
+        NotificationLevel.WARNING: "FFA500",  # Orange
+        NotificationLevel.ERROR: "FF0000",    # Red
+        NotificationLevel.CRITICAL: "8B0000"  # Dark Red
+    }
+
+    color = color_map.get(level, "00FF00")
+
+    # Create adaptive card
+    card = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "type": "AdaptiveCard",
+                    "version": "1.3",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": title,
+                            "weight": "Bolder",
+                            "size": "Medium",
+                            "color": color
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": message,
+                            "wrap": True,
+                            "spacing": "Medium"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Level:** {level.value.upper()}",
+                            "spacing": "Small"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                            "spacing": "Small"
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    # Add details section if provided
+    if details:
+        details_text = "**Details:**\n"
+        for key, value in details.items():
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, indent=2)
+            details_text += f"- **{key}:** {value}\n"
+
+        card["attachments"][0]["content"]["body"].append({
+            "type": "TextBlock",
+            "text": details_text,
+            "wrap": True,
+            "spacing": "Medium"
+        })
+
+    return card
 
 
 class TeamsNotification:
@@ -59,77 +130,7 @@ class TeamsNotification:
             return True
             
         return False
-    
-    def _create_adaptive_card(self, title: str, message: str, level: NotificationLevel, 
-                             details: Optional[Dict] = None) -> Dict:
-        """Create MS Teams adaptive card payload"""
-        
-        # Color coding based on level
-        color_map = {
-            NotificationLevel.INFO: "00FF00",      # Green
-            NotificationLevel.WARNING: "FFA500",  # Orange
-            NotificationLevel.ERROR: "FF0000",    # Red
-            NotificationLevel.CRITICAL: "8B0000"  # Dark Red
-        }
-        
-        color = color_map.get(level, "00FF00")
-        
-        # Create adaptive card
-        card = {
-            "type": "message",
-            "attachments": [
-                {
-                    "contentType": "application/vnd.microsoft.card.adaptive",
-                    "content": {
-                        "type": "AdaptiveCard",
-                        "version": "1.3",
-                        "body": [
-                            {
-                                "type": "TextBlock",
-                                "text": title,
-                                "weight": "Bolder",
-                                "size": "Medium",
-                                "color": "Default"
-                            },
-                            {
-                                "type": "TextBlock",
-                                "text": message,
-                                "wrap": True,
-                                "spacing": "Medium"
-                            },
-                            {
-                                "type": "TextBlock",
-                                "text": f"**Level:** {level.value.upper()}",
-                                "spacing": "Small"
-                            },
-                            {
-                                "type": "TextBlock",
-                                "text": f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-                                "spacing": "Small"
-                            }
-                        ]
-                    }
-                }
-            ]
-        }
-        
-        # Add details section if provided
-        if details:
-            details_text = "**Details:**\n"
-            for key, value in details.items():
-                if isinstance(value, (dict, list)):
-                    value = json.dumps(value, indent=2)
-                details_text += f"- **{key}:** {value}\n"
-            
-            card["attachments"][0]["content"]["body"].append({
-                "type": "TextBlock",
-                "text": details_text,
-                "wrap": True,
-                "spacing": "Medium"
-            })
-        
-        return card
-    
+
     def send_notification(self, title: str, message: str, level: NotificationLevel = NotificationLevel.INFO,
                         details: Optional[Dict] = None, notification_type: str = "general") -> bool:
         """
@@ -151,7 +152,7 @@ class TeamsNotification:
             
         try:
             # Create adaptive card payload
-            payload = self._create_adaptive_card(title, message, level, details)
+            payload = _create_adaptive_card(title, message, level, details)
             
             # Send to MS Teams
             response = requests.post(

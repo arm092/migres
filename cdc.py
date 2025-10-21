@@ -869,25 +869,28 @@ def run_cdc(cfg):
     
     log.info("CDC: batch_delay_seconds=%s, queue-based processing=%s", batch_delay_seconds, batch_delay_seconds > 0)
 
-    stream = BinLogStreamReader(
-        connection_settings={
-            "host": mysql_cfg["host"],
-            "port": mysql_cfg.get("port", 3306),
-            "user": mysql_cfg["user"],
-            "passwd": mysql_cfg["password"],
-        },
-        server_id=server_id,
-        blocking=False,  # Non-blocking to allow queue processing
-        resume_stream=True,
-        only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent, QueryEvent],
-        only_schemas=only_schemas,
-        only_tables=only_tables,
-        ignored_tables=ignored_tables,
-        log_file=(binlog["file"] if binlog else None),
-        log_pos=(binlog["pos"] if binlog else None),
-        slave_heartbeat=heartbeat_seconds,
-    )
+    def create_stream():
+        """Create a new BinLogStreamReader with current configuration"""
+        return BinLogStreamReader(
+            connection_settings={
+                "host": mysql_cfg["host"],
+                "port": mysql_cfg.get("port", 3306),
+                "user": mysql_cfg["user"],
+                "passwd": mysql_cfg["password"],
+            },
+            server_id=server_id,
+            blocking=False,  # Non-blocking to allow queue processing
+            resume_stream=True,
+            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent, QueryEvent],
+            only_schemas=only_schemas,
+            only_tables=only_tables,
+            ignored_tables=ignored_tables,
+            log_file=(binlog["file"] if binlog else None),
+            log_pos=(binlog["pos"] if binlog else None),
+            slave_heartbeat=heartbeat_seconds,
+        )
 
+    stream = create_stream()
     log.info("CDC stream configured: resume_stream=%s, blocking=%s, only_schemas=%s, only_tables=%s, ignored_tables=%s, server_id=%s, log_file=%s, log_pos=%s",
              True, False, only_schemas, only_tables, ignored_tables, server_id, (binlog["file"] if binlog else None), (binlog["pos"] if binlog else None))
 
@@ -895,6 +898,9 @@ def run_cdc(cfg):
     rows_since_checkpoint = 0
     last_queue_process_time = time.time()
     last_heartbeat_time = time.time()
+    stream_reconnect_attempts = 0
+    max_reconnect_attempts = 10
+    reconnect_delay = 1.0  # Start with 1 second
 
     try:
         while True:
@@ -920,6 +926,12 @@ def run_cdc(cfg):
                             rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
                             rows_since_checkpoint += rows_processed
                             log.info("CDC: successfully processed %d rows from queue", rows_processed)
+                            
+                            # Reset reconnection counters on successful event processing
+                            if stream_reconnect_attempts > 0:
+                                log.info("CDC: Resetting reconnection counters after successful event processing")
+                                stream_reconnect_attempts = 0
+                                reconnect_delay = 1.0
                         except CriticalCDCError as e:
                             log.critical("CDC: Critical error occurred - %s", str(e))
                             # Send critical error notification with query pools
@@ -964,9 +976,69 @@ def run_cdc(cfg):
                     
                     continue
             except Exception as e:
-                log.debug("CDC: no event available: %s", e)
-                time.sleep(0.1)
-                continue
+                # Check if this is a connection-related error that requires stream reconnection
+                error_str = str(e).lower()
+                connection_errors = ['connection', 'timeout', 'lost', 'broken', 'closed', 'reset', 'refused']
+                is_connection_error = any(err in error_str for err in connection_errors)
+                
+                if is_connection_error and stream_reconnect_attempts < max_reconnect_attempts:
+                    stream_reconnect_attempts += 1
+                    log.warning("CDC: Stream connection error detected (attempt %d/%d): %s", 
+                              stream_reconnect_attempts, max_reconnect_attempts, e)
+                    log.info("CDC: Attempting to reconnect stream in %.1f seconds...", reconnect_delay)
+                    
+                    try:
+                        # Close existing stream
+                        if stream:
+                            stream.close()
+                        
+                        # Wait before reconnecting
+                        time.sleep(reconnect_delay)
+                        
+                        # Test MySQL connection first
+                        try:
+                            mysql_client.connect()
+                            log.info("CDC: MySQL connection test successful")
+                        except Exception as mysql_e:
+                            log.warning("CDC: MySQL connection test failed: %s", mysql_e)
+                            raise mysql_e
+                        
+                        # Recreate stream
+                        stream = create_stream()
+                        log.info("CDC: Stream reconnected successfully")
+                        
+                        # Update binlog position from current stream
+                        state.set_binlog(stream.log_file, stream.log_pos)
+                        log.info("CDC: Updated binlog position to %s:%s", stream.log_file, stream.log_pos)
+                        
+                        # Only reset counters if we successfully process at least one event
+                        # For now, continue with current attempt count and delay
+                        # The counters will be reset when we successfully process events
+                        continue
+                    except Exception as reconnect_e:
+                        log.error("CDC: Stream reconnection failed (attempt %d): %s", stream_reconnect_attempts, reconnect_e)
+                        # Exponential backoff
+                        reconnect_delay = min(reconnect_delay * 2, 60.0)  # Cap at 60 seconds
+                        time.sleep(reconnect_delay)
+                        continue
+                else:
+                    if stream_reconnect_attempts >= max_reconnect_attempts:
+                        log.critical("CDC: Maximum reconnection attempts (%d) exceeded. Process will exit.", max_reconnect_attempts)
+                        notify_cdc_error(
+                            error_type="Stream Connection Failure",
+                            table="CDC Process",
+                            error_message=f"Failed to reconnect after {max_reconnect_attempts} attempts",
+                            operation_details={
+                                "Error": str(e),
+                                "Reconnection Attempts": stream_reconnect_attempts,
+                                "Action": "Process exiting"
+                            }
+                        )
+                        sys.exit(1)
+                    else:
+                        log.debug("CDC: no event available: %s", e)
+                        time.sleep(0.1)
+                        continue
             
             try:
                 schema = getattr(event, "schema", None)
@@ -1155,6 +1227,12 @@ def run_cdc(cfg):
                         rows_since_checkpoint += rows_processed
                         # Clear query pools after successful immediate processing
                         _clear_query_pools()
+                        
+                        # Reset reconnection counters on successful event processing
+                        if stream_reconnect_attempts > 0:
+                            log.info("CDC: Resetting reconnection counters after successful immediate event processing")
+                            stream_reconnect_attempts = 0
+                            reconnect_delay = 1.0
                     except Exception as e:
                         log.critical("CDC: Critical error processing event immediately - %s", str(e))
                         # Send critical error notification with query pools
