@@ -35,6 +35,14 @@ def _process_table_worker(table, cfg, state: StateJson):
         mysql_cols = [c["COLUMN_NAME"] for c in cols_meta]
         log.info("Worker: %s columns: %s; pk: %s", table, mysql_cols, pk_cols)
 
+        # To avoid duplicate data when snapshot is re-run without prior state,
+        # drop the ClickHouse table if it already exists before recreating it.
+        try:
+            ch.execute(f"DROP TABLE IF EXISTS `{table}`")
+            log.info("Worker: dropped existing ClickHouse table %s (if any)", table)
+        except Exception:
+            log.exception("Worker: failed to drop ClickHouse table %s (continuing)", table)
+
         # build DDL and insertable columns
         ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, mig_cfg)
         log.info("Worker: creating ClickHouse table %s ...", table)
