@@ -55,9 +55,29 @@ def _process_table_worker(table, cfg, state: StateJson):
         if pk_cols and len(pk_cols) == 1:
             pkname = pk_cols[0]
             pk_meta = next((c for c in cols_meta if c["COLUMN_NAME"] == pkname), None)
-            if pk_meta and pk_meta["DATA_TYPE"] in ("tinyint","smallint","mediumint","int","integer","bigint"):
+            # Normalize DATA_TYPE for robust comparison - handle bytes objects
+            raw_dtype = (pk_meta or {}).get("DATA_TYPE", "")
+            if isinstance(raw_dtype, bytes):
+                pk_dtype = raw_dtype.decode('utf-8').lower()
+            else:
+                pk_dtype = str(raw_dtype).lower()
+            # Helpful debug: log PK column and its types
+            if pk_meta:
+                log.info(
+                    "Worker: detected PK %s data_type=%s column_type=%s",
+                    pkname,
+                    pk_dtype,
+                    str(pk_meta.get("COLUMN_TYPE"))
+                )
+            if pk_meta and pk_dtype in ("tinyint","smallint","mediumint","int","integer","bigint"):
                 use_pk_method = True
                 pk_col = pkname
+            else:
+                log.info(
+                    "Worker: falling back to offset for table %s (pk dtype: %s)",
+                    table,
+                    pk_dtype or "<unknown>"
+                )
 
         if use_pk_method:
             log.info("Worker: using PK method for table %s on %s", table, pk_col)
