@@ -25,15 +25,72 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
                           details: Optional[Dict] = None) -> Dict:
     """Create MS Teams adaptive card payload"""
 
-    # Color coding based on level
+    # Remove emojis from title (MS Teams webhooks can have issues with emojis in adaptive cards)
+    # Keep emojis for display but use clean text for adaptive card
+    clean_title = title
+    # Optionally strip emojis if needed, but let's try keeping them first
+    
+    # Color coding based on level - use standard Adaptive Card colors
     color_map = {
-        NotificationLevel.INFO: "00FF00",      # Green
-        NotificationLevel.WARNING: "FFA500",  # Orange
-        NotificationLevel.ERROR: "FF0000",    # Red
-        NotificationLevel.CRITICAL: "8B0000"  # Dark Red
+        NotificationLevel.INFO: "Good",      # Green
+        NotificationLevel.WARNING: "Warning",  # Orange
+        NotificationLevel.ERROR: "Attention",    # Red
+        NotificationLevel.CRITICAL: "Attention"  # Dark Red
     }
 
-    color = color_map.get(level, "00FF00")
+    color = color_map.get(level, "Good")
+
+    # Create adaptive card body
+    body = [
+        {
+            "type": "TextBlock",
+            "text": clean_title,
+            "weight": "Bolder",
+            "size": "Medium",
+            "color": color,
+            "wrap": True
+        },
+        {
+            "type": "TextBlock",
+            "text": message,
+            "wrap": True,
+            "spacing": "Medium"
+        },
+        {
+            "type": "TextBlock",
+            "text": f"Level: {level.value.upper()}",
+            "spacing": "Small",
+            "isSubtle": True
+        },
+        {
+            "type": "TextBlock",
+            "text": f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            "spacing": "Small",
+            "isSubtle": True
+        }
+    ]
+
+    # Add details section if provided
+    if details:
+        details_items = []
+        for key, value in details.items():
+            if isinstance(value, (dict, list)):
+                value_str = json.dumps(value, indent=2)
+            else:
+                value_str = str(value)
+            # Truncate long values to avoid payload size issues
+            if len(value_str) > 500:
+                value_str = value_str[:500] + "... (truncated)"
+            details_items.append(f"{key}: {value_str}")
+        
+        details_text = "\n".join(details_items)
+        body.append({
+            "type": "TextBlock",
+            "text": f"Details:\n{details_text}",
+            "wrap": True,
+            "spacing": "Medium",
+            "separator": True
+        })
 
     # Create adaptive card
     card = {
@@ -43,51 +100,12 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "content": {
                     "type": "AdaptiveCard",
-                    "version": "1.3",
-                    "body": [
-                        {
-                            "type": "TextBlock",
-                            "text": title,
-                            "weight": "Bolder",
-                            "size": "Medium",
-                            "color": color
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": message,
-                            "wrap": True,
-                            "spacing": "Medium"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"**Level:** {level.value.upper()}",
-                            "spacing": "Small"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-                            "spacing": "Small"
-                        }
-                    ]
+                    "version": "1.2",
+                    "body": body
                 }
             }
         ]
     }
-
-    # Add details section if provided
-    if details:
-        details_text = "**Details:**\n"
-        for key, value in details.items():
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value, indent=2)
-            details_text += f"- **{key}:** {value}\n"
-
-        card["attachments"][0]["content"]["body"].append({
-            "type": "TextBlock",
-            "text": details_text,
-            "wrap": True,
-            "spacing": "Medium"
-        })
 
     return card
 
@@ -95,7 +113,7 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
 class TeamsNotification:
     """MS Teams notification handler"""
     
-    def __init__(self, webhook_url: str, enabled: bool = True, rate_limit_seconds: int = 60):
+    def __init__(self, webhook_url: str, enabled: bool = True, rate_limit_seconds: int = 60, environment: str = "local"):
         """
         Initialize MS Teams notification handler
         
@@ -103,11 +121,17 @@ class TeamsNotification:
             webhook_url: MS Teams webhook URL
             enabled: Whether notifications are enabled
             rate_limit_seconds: Minimum seconds between notifications (0 = no limit)
+            environment: Environment name (e.g., "local", "prod") - will be shown in titles as [ENVIRONMENT]
         """
         self.webhook_url = webhook_url
         self.enabled = enabled
         self.rate_limit_seconds = rate_limit_seconds
+        self.environment = environment.upper()
         self.last_notification_time = {}
+    
+    def _format_title(self, title: str) -> str:
+        """Format notification title with environment tag"""
+        return f"{title} [{self.environment}]"
         
     def _should_send_notification(self, notification_type: str) -> bool:
         """Check if notification should be sent based on rate limiting"""
@@ -154,6 +178,9 @@ class TeamsNotification:
             # Create adaptive card payload
             payload = _create_adaptive_card(title, message, level, details)
             
+            # Debug: log payload structure (without sensitive data)
+            log.debug(f"Sending MS Teams notification payload: {json.dumps(payload, indent=2)}")
+            
             # Send to MS Teams
             response = requests.post(
                 self.webhook_url,
@@ -161,9 +188,21 @@ class TeamsNotification:
                 timeout=10
             )
             
+            # MS Teams webhooks return 200 with body "1" on success
+            # They can also return 200 with error messages, so check the body
+            response_text = response.text.strip() if response.text else ""
+            
             if response.status_code == 200:
-                log.info(f"MS Teams notification sent successfully: {title}")
-                return True
+                # Check if response indicates success (MS Teams returns "1" on success)
+                if response_text == "1":
+                    log.info(f"MS Teams notification sent successfully: {title}")
+                    return True
+                else:
+                    # HTTP 200 but body indicates an error
+                    error_msg = f"MS Teams webhook returned 200 but with error response: {response_text}"
+                    log.error(error_msg)
+                    log.debug(f"Full response: status={response.status_code}, headers={response.headers}, body={response_text}")
+                    return False
             else:
                 error_msg = f"Failed to send MS Teams notification. Status: {response.status_code}"
                 if response.status_code == 404:
@@ -173,9 +212,10 @@ class TeamsNotification:
                 elif response.status_code == 401:
                     error_msg += " (Unauthorized - check webhook permissions)"
                 else:
-                    error_msg += f", Response: {response.text}"
+                    error_msg += f", Response: {response_text}"
                 
                 log.error(error_msg)
+                log.debug(f"Full response: status={response.status_code}, headers={response.headers}, body={response_text}")
                 return False
                 
         except requests.exceptions.RequestException as e:
@@ -188,7 +228,7 @@ class TeamsNotification:
     def send_cdc_error(self, error_type: str, table: str, error_message: str, 
                       operation_details: Optional[Dict] = None) -> bool:
         """Send CDC error notification"""
-        title = f"🚨 CDC Error: {error_type}"
+        title = self._format_title(f"🚨 CDC Error: {error_type}")
         message = f"**Table:** {table}\n**Error:** {error_message}"
         
         details = {
@@ -211,7 +251,7 @@ class TeamsNotification:
     def send_cdc_warning(self, warning_type: str, table: str, warning_message: str,
                         details: Optional[Dict] = None) -> bool:
         """Send CDC warning notification"""
-        title = f"⚠️ CDC Warning: {warning_type}"
+        title = self._format_title(f"⚠️ CDC Warning: {warning_type}")
         message = f"**Table:** {table}\n**Warning:** {warning_message}"
         
         notification_details = {
@@ -233,7 +273,7 @@ class TeamsNotification:
     
     def send_cdc_info(self, info_type: str, message: str, details: Optional[Dict] = None) -> bool:
         """Send CDC info notification"""
-        title = f"ℹ️ CDC Info: {info_type}"
+        title = self._format_title(f"ℹ️ CDC Info: {info_type}")
         
         notification_details = {
             "Info Type": info_type,
@@ -253,7 +293,7 @@ class TeamsNotification:
     
     def send_cdc_startup(self, config_summary: Dict) -> bool:
         """Send CDC startup notification"""
-        title = "🚀 CDC Process Started"
+        title = self._format_title("🚀 CDC Process Started")
         message = "CDC (Change Data Capture) process has started successfully"
         
         details = {
@@ -271,7 +311,7 @@ class TeamsNotification:
     
     def send_cdc_shutdown(self, reason: str = "Normal shutdown") -> bool:
         """Send CDC shutdown notification"""
-        title = "🛑 CDC Process Stopped"
+        title = self._format_title("🛑 CDC Process Stopped")
         message = f"CDC process has stopped. Reason: {reason}"
         
         details = {
@@ -288,12 +328,13 @@ class TeamsNotification:
         )
 
 
-def create_notification_handler(config: Dict) -> Optional[TeamsNotification]:
+def create_notification_handler(config: Dict, environment: str = "local") -> Optional[TeamsNotification]:
     """
     Create notification handler from configuration
     
     Args:
         config: Notification configuration dictionary
+        environment: Environment name (default: "local")
         
     Returns:
         TeamsNotification instance or None if disabled
@@ -312,7 +353,8 @@ def create_notification_handler(config: Dict) -> Optional[TeamsNotification]:
     return TeamsNotification(
         webhook_url=webhook_url,
         enabled=True,
-        rate_limit_seconds=rate_limit
+        rate_limit_seconds=rate_limit,
+        environment=environment
     )
 
 
@@ -320,20 +362,21 @@ def create_notification_handler(config: Dict) -> Optional[TeamsNotification]:
 _notification_handler: Optional[TeamsNotification] = None
 
 
-def initialize_notifications(config: Dict) -> bool:
+def initialize_notifications(config: Dict, environment: str = "local") -> bool:
     """
     Initialize global notification handler
     
     Args:
         config: Notification configuration
-        
+        environment: Environment name (default: "local")
+    
     Returns:
         bool: True if initialized successfully
     """
     global _notification_handler
     
     try:
-        _notification_handler = create_notification_handler(config)
+        _notification_handler = create_notification_handler(config, environment)
         if _notification_handler:
             log.info("MS Teams notifications initialized successfully")
             return True

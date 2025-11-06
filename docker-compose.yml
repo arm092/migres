@@ -1,15 +1,15 @@
 version: "3.8"
 services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    container_name: clickhouse
-    ports:
-      - "8123:8123"   # HTTP interface
-      - "9000:9000"   # Native TCP interface
-    environment:
-      CLICKHOUSE_USER: chuser
-      CLICKHOUSE_DB: target_migres
-      CLICKHOUSE_PASSWORD: "ch_password"
+#  clickhouse:
+#    image: clickhouse/clickhouse-server:latest
+#    container_name: clickhouse
+#    ports:
+#      - "8123:8123"   # HTTP interface
+#      - "9000:9000"   # Native TCP interface
+#    environment:
+#      CLICKHOUSE_USER: chuser
+#      CLICKHOUSE_DB: target_migres
+#      CLICKHOUSE_PASSWORD: "ch_password"
 
   migres:
     build: .

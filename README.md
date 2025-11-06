@@ -232,6 +232,9 @@ export CLICKHOUSE_PASSWORD=your-password
 # Notifications
 export NOTIFICATIONS_ENABLED=true
 export NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
+
+# Environment name (used in notification titles)
+export ENVIRONMENT=prod
 ```
 
 See [Environment Variables Documentation](docs/ENVIRONMENT_VARIABLES.md) for complete list of supported variables.

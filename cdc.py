@@ -823,7 +823,8 @@ def run_cdc(cfg):
     
     # Initialize notifications
     notification_config = cfg.get("notifications", {})
-    initialize_notifications(notification_config)
+    environment = cfg.get("environment", "local")
+    initialize_notifications(notification_config, environment)
     
     # Send startup notification
     config_summary = {

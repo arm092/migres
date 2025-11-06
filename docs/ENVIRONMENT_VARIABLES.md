@@ -51,6 +51,16 @@ CHECKPOINT_FILE=/app/data/binlog_checkpoint.json
 STATE_FILE=/app/data/state.json
 ```
 
+### Environment Name
+```bash
+ENVIRONMENT=prod
+# or
+ENVIRONMENT=local
+# or
+ENVIRONMENT=staging
+```
+**Note:** The environment name is used in notification titles (e.g., "🚀 CDC Process Started [PROD]"). Defaults to `local` if not set.
+
 ## 📋 Usage Examples
 
 ### Docker Run
@@ -75,6 +85,7 @@ services:
       - CLICKHOUSE_PASSWORD=secret
       - NOTIFICATIONS_ENABLED=true
       - NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
+      - ENVIRONMENT=prod
 ```
 
 ### Kubernetes Deployment
@@ -140,6 +151,10 @@ python migres.py
 # Test notifications
 export NOTIFICATIONS_ENABLED=true
 export NOTIFICATIONS_WEBHOOK_URL=https://test-webhook.com
+python migres.py
+
+# Test environment variable
+export ENVIRONMENT=prod
 python migres.py
 ```
 

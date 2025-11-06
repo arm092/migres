@@ -37,6 +37,10 @@ checkpoint_file: /app/data/binlog_checkpoint.json
 # Where migres persists its resumable state
 state_file: /app/data/state.json
 
+# Can be overridden with ENVIRONMENT environment variable
+# Default: local
+environment: local
+
 # MS Teams Notifications
 notifications:
   enabled: true

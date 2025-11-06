@@ -163,4 +163,11 @@ def _apply_env_overrides(cfg):
             cfg[config_key] = os.environ[env_var]
             log.info(f"Override: {config_key} = {os.environ[env_var]}")
     
+    # Environment variable (default: local)
+    if "ENVIRONMENT" in os.environ:
+        cfg["environment"] = os.environ["ENVIRONMENT"]
+        log.info(f"Override: environment = {cfg['environment']}")
+    else:
+        cfg.setdefault("environment", "local")
+    
     return cfg
