@@ -19,12 +19,15 @@ clickhouse:
   database: target_db
 
 migration:
+  # Debug mode (true/false) - enables verbose logging for CDC events
+  # Can be overridden with MIGRATION_DEBUG environment variable
+  debug: false
   batch_rows: 5000
   ddl_engine: "ReplacingMergeTree"
   low_cardinality_strings: true
   workers: 4   # number of parallel table workers (default 4)
   # Timezone configuration for datetime/timestamp columns
-  clickhouse_timezone: "Europe/Moscow"  # Set to desired ClickHouse timezone
+  clickhouse_timezone: "Asia/Yerevan"  # Set to desired ClickHouse timezone
   cdc:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000
@@ -38,13 +41,12 @@ checkpoint_file: /app/data/binlog_checkpoint.json
 state_file: /app/data/state.json
 
 # Can be overridden with ENVIRONMENT environment variable
-# Default: local
-environment: local
+# Default: prod
+environment: dev
 
 # MS Teams Notifications
 notifications:
   enabled: true
   webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
   rate_limit_seconds: 60  # Minimum seconds between notifications (0 = no limit)
-  # Notification levels: info, warning, error, critical
   # Rate limiting is per notification type (cdc_error, cdc_warning, cdc_info, etc.)

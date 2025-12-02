@@ -66,3 +66,6 @@ class CHClient:
         except Exception:
             log.exception("ClickHouse insert failed for table %s", table)
             raise
+
+    def close(self):
+        self.client.disconnect()

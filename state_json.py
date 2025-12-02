@@ -22,8 +22,8 @@ class StateJson:
                 with open(self.path, "r", encoding="utf-8") as f:
                     self._data = json.load(f)
                 log.info("Loaded state from %s", self.path)
-            except Exception:
-                log.exception("Failed to load state file; starting fresh")
+            except (IOError, json.JSONDecodeError) as e:
+                log.exception("Failed to load state file; starting fresh: %s", e)
                 self._data = {"binlog": None, "tables": {}}
         else:
             d = os.path.dirname(self.path)
@@ -44,8 +44,8 @@ class StateJson:
         with self._lock:
             try:
                 self._flush()
-            except Exception:
-                log.exception("Failed to write state")
+            except (IOError, TypeError) as e:
+                log.exception("Failed to write state: %s", e)
 
     # binlog
     def set_binlog(self, file, pos):

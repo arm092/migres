@@ -28,7 +28,9 @@ MIGRATION_MODE=cdc
 MIGRATION_BATCH_ROWS=5000
 MIGRATION_WORKERS=4
 MIGRATION_CLICKHOUSE_TIMEZONE=UTC
+MIGRATION_DEBUG=true
 ```
+**Note:** `MIGRATION_DEBUG` enables verbose logging for CDC events.
 
 ### CDC Configuration
 ```bash
@@ -55,11 +57,11 @@ STATE_FILE=/app/data/state.json
 ```bash
 ENVIRONMENT=prod
 # or
-ENVIRONMENT=local
+ENVIRONMENT=dev
 # or
-ENVIRONMENT=staging
+ENVIRONMENT=stage
 ```
-**Note:** The environment name is used in notification titles (e.g., "🚀 CDC Process Started [PROD]"). Defaults to `local` if not set.
+**Note:** The environment name is used in notification titles (e.g., "🚀 CDC Process Started [PROD]"). Defaults to `prod` if not set.
 
 ## 📋 Usage Examples
 
@@ -69,6 +71,7 @@ docker run -e MYSQL_HOST=mysql-server \
            -e MYSQL_PASSWORD=secret \
            -e CLICKHOUSE_HOST=ch-server \
            -e CLICKHOUSE_PASSWORD=secret \
+           -e MIGRATION_DEBUG=true \
            migres:latest
 ```
 
@@ -86,6 +89,7 @@ services:
       - NOTIFICATIONS_ENABLED=true
       - NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
       - ENVIRONMENT=prod
+      - MIGRATION_DEBUG=true
 ```
 
 ### Kubernetes Deployment
@@ -115,6 +119,8 @@ spec:
             secretKeyRef:
               name: clickhouse-secret
               key: password
+        - name: MIGRATION_DEBUG
+          value: "true"
 ```
 
 ## 🔍 How It Works
@@ -129,7 +135,7 @@ spec:
 
 - **Priority**: Environment variables always override config.yml values
 - **Type Safety**: Invalid values (e.g., non-numeric ports) are ignored with warnings
-- **Boolean Values**: For `NOTIFICATIONS_ENABLED`, use `true`, `1`, `yes`, or `on` for true
+- **Boolean Values**: For `NOTIFICATIONS_ENABLED` and `MIGRATION_DEBUG`, use `true`, `1`, `yes`, or `on` for true
 - **Secrets**: Use environment variables for sensitive data like passwords
 - **Logging**: Check logs to see which values were overridden
 
@@ -156,7 +162,10 @@ python migres.py
 # Test environment variable
 export ENVIRONMENT=prod
 python migres.py
+
+# Test debug mode
+export MIGRATION_DEBUG=true
+python migres.py
 ```
 
 The tool will log all overrides, making it easy to verify that environment variables are being applied correctly.
-

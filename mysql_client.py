@@ -26,7 +26,7 @@ class MySQLClient:
         if self.cn:
             try:
                 self.cn.close()
-            except Exception:
+            except mysql.connector.Error:
                 pass
 
     def get_mysql_version(self):
@@ -49,7 +49,7 @@ class MySQLClient:
                 # Fallback to assuming older version
                 log.warning("Could not parse MySQL version '%s', assuming 8.0", version_str)
                 return 8, 0
-        except Exception as e:
+        except mysql.connector.Error as e:
             log.warning("Failed to get MySQL version: %s", e)
             cur.close()
             # Fallback to assuming older version
@@ -81,7 +81,7 @@ class MySQLClient:
             # Both commands return the same format: (file, position, ...)
             return row[0], int(row[1])
             
-        except Exception as e:
+        except mysql.connector.Error as e:
             log.warning("Failed to get binary log status: %s", e)
             cur.close()
             return None
@@ -90,7 +90,7 @@ class MySQLClient:
         try:
             self.cn.start_transaction(isolation_level='REPEATABLE READ')
             log.info("Started REPEATABLE READ transaction for consistent snapshot (this connection)")
-        except Exception:
+        except mysql.connector.Error:
             cur = self.cn.cursor()
             cur.execute("START TRANSACTION")
             cur.close()
@@ -162,7 +162,7 @@ class MySQLClient:
             cur.close()
             return cols, pk
             
-        except Exception as e:
+        except mysql.connector.Error as e:
             log.error("MySQL: Error getting schema for table '%s': %s", table, str(e))
             cur.close()
             raise

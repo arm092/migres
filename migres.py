@@ -12,7 +12,15 @@ def main():
     ap.add_argument("--config", required=True, help="Path to config.yml")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except (IOError, OSError) as e:
+        logging.error("Failed to load config file: %s", e)
+        sys.exit(1)
+    except (ValueError, KeyError) as e:
+        logging.error("Invalid config file format: %s", e)
+        sys.exit(1)
+
     setup_logging()
 
     mode = (cfg.get("migration", {}).get("mode") or "snapshot").lower()
@@ -20,22 +28,33 @@ def main():
         logging.info("Starting migres (snapshot) mode...")
         try:
             run_snapshot(cfg)
-        except Exception:
-            logging.exception("Snapshot failed:")
+        except (IOError, OSError) as e:
+            logging.exception("Snapshot failed due to a file or system error:")
+            sys.exit(2)
+        except (ValueError, KeyError) as e:
+            logging.exception("Snapshot failed due to a configuration or data error:")
+            sys.exit(2)
+        except Exception as e:
+            logging.exception("An unexpected error occurred during snapshot:")
             sys.exit(2)
         logging.info("Snapshot finished successfully.")
     elif mode == "cdc":
         logging.info("Starting migres (CDC) mode...")
         try:
-            # ptionally, run a snapshot first to build a complete baseline
             cdc_cfg = (cfg.get("migration", {}).get("cdc", {}) or {})
             snapshot_before = bool(cdc_cfg.get("snapshot_before", True))
             if snapshot_before:
                 logging.info("CDC: running initial snapshot before starting binlog streaming...")
                 try:
                     run_snapshot(cfg)
-                except Exception:
-                    logging.exception("The Initial snapshot failed before the CDC started:")
+                except (IOError, OSError) as e:
+                    logging.exception("The initial snapshot failed before the CDC started due to a file or system error:")
+                    raise
+                except (ValueError, KeyError) as e:
+                    logging.exception("The initial snapshot failed before the CDC started due to a configuration or data error:")
+                    raise
+                except Exception as e:
+                    logging.exception("An unexpected error occurred during the initial snapshot before the CDC started:")
                     raise
                 logging.info("CDC: initial snapshot completed, starting binlog streaming...")
 
@@ -43,8 +62,14 @@ def main():
         except CriticalCDCError as e:
             logging.critical("CDC failed with critical error: %s", str(e))
             sys.exit(1)  # Exit with error code 1 for critical errors
-        except Exception:
-            logging.exception("CDC failed:")
+        except (IOError, OSError) as e:
+            logging.exception("CDC failed due to a file or system error:")
+            sys.exit(3)
+        except (ValueError, KeyError) as e:
+            logging.exception("CDC failed due to a configuration or data error:")
+            sys.exit(3)
+        except Exception as e:
+            logging.exception("An unexpected error occurred during CDC:")
             sys.exit(3)
         logging.info("CDC terminated.")
     else:

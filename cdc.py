@@ -7,12 +7,14 @@ import sys
 from datetime import datetime
 from typing import Dict, List
 from collections import defaultdict
+import mysql.connector
+import requests
 
 from mysql_client import MySQLClient
 from clickhouse_client import CHClient
 from schema_and_ddl import build_table_ddl, ensure_clickhouse_columns
 from state_json import StateJson
-from notifications import initialize_notifications, notify_cdc_error, notify_cdc_warning, notify_cdc_info, notify_cdc_startup, notify_cdc_shutdown
+from notifications import initialize_notifications, notify_cdc_error, notify_cdc_info, notify_cdc_startup, notify_cdc_shutdown
 
 from pymysqlreplication import BinLogStreamReader
 from pymysqlreplication.row_event import WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent
@@ -105,8 +107,9 @@ def _build_insertable(cols_meta, pk_cols, mig_cfg):
     return insert_cols
 
 
-def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: str, mig_cfg):
-    log.info("CDC: _ensure_table_and_columns called for table: %s", table)
+def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: str, mig_cfg: dict):
+    if mig_cfg.get('debug'):
+        log.info("CDC: _ensure_table_and_columns called for table: %s", table)
     
     # Retry mechanism for INFORMATION_SCHEMA timing issues and connection problems
     cols_meta, pk_cols = None, None
@@ -122,7 +125,7 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
                 try:
                     mysql_client.connect()
                     log.info("CDC: MySQL connection restored")
-                except Exception as conn_e:
+                except mysql.connector.Error as conn_e:
                     log.error("CDC: Failed to reconnect to MySQL: %s", conn_e)
                     last_error = conn_e
                     if attempt < max_retries - 1:
@@ -132,11 +135,13 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
                     continue
             
             cols_meta, pk_cols = mysql_client.get_table_columns_and_pk(table)
-            log.info("CDC: MySQL schema for %s (attempt %d) - columns: %s, pk: %s", 
-                     table, attempt + 1, [c["COLUMN_NAME"] for c in cols_meta], pk_cols)
+            if mig_cfg.get('debug'):
+                log.info("CDC: MySQL schema for %s (attempt %d) - columns: %s, pk: %s", 
+                         table, attempt + 1, [c["COLUMN_NAME"] for c in cols_meta], pk_cols)
             
             if cols_meta and len(cols_meta) > 0:
-                log.info("CDC: Successfully retrieved schema for %s", table)
+                if mig_cfg.get('debug'):
+                    log.info("CDC: Successfully retrieved schema for %s", table)
                 break
             else:
                 log.warning("CDC: No columns found for %s (attempt %d), retrying in %.1fs...", 
@@ -145,7 +150,7 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
                     import time
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
-        except Exception as e:
+        except (mysql.connector.Error, IOError) as e:
             last_error = e
             log.warning("CDC: Error getting schema for %s (attempt %d): %s", table, attempt + 1, e)
             if attempt < max_retries - 1:
@@ -177,14 +182,16 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
     
     # Build ClickHouse DDL
     ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, mig_cfg)
-    log.info("CDC: Generated DDL for %s: %s", table, ddl[:200] + "..." if len(ddl) > 200 else ddl)
-    log.info("CDC: Insert columns for %s: %s", table, insert_cols)
+    if mig_cfg.get('debug'):
+        log.info("CDC: Generated DDL for %s: %s", table, ddl[:200] + "..." if len(ddl) > 200 else ddl)
+        log.info("CDC: Insert columns for %s: %s", table, insert_cols)
     
     # Create/update ClickHouse table
     try:
         ch.execute(ddl)
-        log.info("CDC: Successfully executed DDL for table %s", table)
-    except Exception as e:
+        if mig_cfg.get('debug'):
+            log.info("CDC: Successfully executed DDL for table %s", table)
+    except (IOError, requests.exceptions.RequestException) as e:
         log.error("CDC: Failed to execute DDL for table %s: %s", table, e)
         raise
     
@@ -206,10 +213,12 @@ def _ensure_table_and_columns(mysql_client: MySQLClient, ch: CHClient, table: st
         ("__data_transfer_delete_time", "UInt64")
     ])
     
-    log.info("CDC: Ensuring columns for %s: %s", table, [d["name"] if isinstance(d, dict) else d[0] for d in desired])
+    if mig_cfg.get('debug'):
+        log.info("CDC: Ensuring columns for %s: %s", table, [d["name"] if isinstance(d, dict) else d[0] for d in desired])
     ensure_clickhouse_columns(ch, table, desired)
     
-    log.info("CDC: Table %s schema creation completed successfully", table)
+    if mig_cfg.get('debug'):
+        log.info("CDC: Table %s schema creation completed successfully", table)
     return insert_cols, cols_meta, pk_cols
 
 
@@ -385,7 +394,7 @@ def _dump_failed_operations(operations: List[Dict], error_msg: str):
         log.error("Failed operations dumped to %s", filename)
         log.error("Dump contains %d operations with %d SQL queries", 
                  len(operations), len(dump_data["metadata"]["clickhouse_queries"]))
-    except Exception as e:
+    except (IOError, TypeError) as e:
         log.exception("Failed to dump operations to file: %s", e)
 
 
@@ -400,7 +409,7 @@ def _generate_real_sql_query(operation: Dict, schema: str, table: str, event_typ
             return _generate_delete_sql(operation, schema, table)
         else:
             return f"-- Unknown operation type: {event_type}\n-- Manual review required for {schema}.{table}"
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         return f"-- Error generating SQL for {event_type}: {e}\n-- Manual review required for {schema}.{table}"
 
 
@@ -560,8 +569,9 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
         try:
             # Count total rows across all events in this group
             total_rows_in_group = sum(len(getattr(event, 'rows', [])) for event in events)
-            log.info("CDC: processing group %s.%s (%s) with %d events containing %d total rows", 
-                    schema, table, event_type, len(events), total_rows_in_group)
+            if mig_cfg.get('debug'):
+                log.info("CDC: processing group %s.%s (%s) with %d events containing %d total rows", 
+                        schema, table, event_type, len(events), total_rows_in_group)
             
             # Combine all rows from events of the same type
             all_rows = []
@@ -584,9 +594,10 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
             rows_processed = _process_batched_event(combined_event, mysql_client, ch, table_cache, mig_cfg)
             total_rows += rows_processed
             
-            log.info("CDC: successfully processed %d rows for %s.%s (%s)", rows_processed, schema, table, event_type)
+            if mig_cfg.get('debug'):
+                log.info("CDC: successfully processed %d rows for %s.%s (%s)", rows_processed, schema, table, event_type)
             
-        except Exception as e:
+        except (requests.exceptions.RequestException, IOError, TypeError) as e:
             log.exception("CDC: failed to process group %s.%s (%s)", schema, table, event_type)
             # Collect failed operation details
             operation = {
@@ -609,7 +620,7 @@ def _process_grouped_events(groups: Dict, mysql_client: MySQLClient, ch: CHClien
                         "rows": getattr(event, 'rows', [])  # Include actual row data
                     }
                     operation["events"].append(event_data)
-                except Exception:
+                except (AttributeError, TypeError, ValueError):
                     pass
             
             failed_operations.append(operation)
@@ -670,12 +681,14 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
     table = getattr(event, "table", None)
     
     if not table:
-        log.info("CDC: skipping event without table: %s", event.__class__.__name__)
+        if mig_cfg.get('debug'):
+            log.info("CDC: skipping event without table: %s", event.__class__.__name__)
         return 0
     
     # Ensure table exists in CH and columns are up-to-date
     if table not in table_cache:
-        log.info("CDC: Table %s not in cache, ensuring table and columns", table)
+        if mig_cfg.get('debug'):
+            log.info("CDC: Table %s not in cache, ensuring table and columns", table)
         insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
         table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
     
@@ -695,7 +708,8 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
                 # This indicates a real schema change, not just missing columns in the event
                 new_cols = incoming_cols - cached_cols
                 if new_cols:
-                    log.info("CDC: detected new columns %s for %s, refreshing schema...", new_cols, table)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: detected new columns %s for %s, refreshing schema...", new_cols, table)
                     insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
                     table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
                     cached_cols = set(insert_cols[:-2])
@@ -726,7 +740,7 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
         
         try:
             ch.insert_rows(table, insert_cols, rows)
-        except Exception:
+        except (IOError, requests.exceptions.RequestException) as e:
             # If insert fails due to missing column(s), refresh schema and retry once
             log.exception("CDC: insert failed, refreshing schema and retrying once for %s", table)
             insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
@@ -734,7 +748,8 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
             # Retry the insert with updated schema
             ch.insert_rows(table, insert_cols, rows)
         
-        log.info("CDC: inserted %d row(s) into %s (INSERT)", len(rows), table)
+        if mig_cfg.get('debug'):
+            log.info("CDC: inserted %d row(s) into %s (INSERT)", len(rows), table)
         return len(rows)
     
     elif isinstance(event, UpdateRowsEvent) or event.__class__.__name__ == "UpdateRowsEvent":
@@ -750,7 +765,8 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
                 # Only refresh if we have columns that are NOT in our cache
                 new_cols = incoming_cols - cached_cols
                 if new_cols:
-                    log.info("CDC: detected new columns %s for %s, refreshing schema...", new_cols, table)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: detected new columns %s for %s, refreshing schema...", new_cols, table)
                     insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
                     table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
                     cached_cols = set(insert_cols[:-2])
@@ -770,7 +786,7 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
                                 break
                         if new_cols_after_refresh:
                             log.error("CDC: columns %s still missing after retries, proceeding with available columns", new_cols_after_refresh)
-        except Exception:
+        except (AttributeError, KeyError, TypeError):
             log.exception("CDC: failed to check schema on UPDATE; proceeding with current cache")
         
         rows = []
@@ -783,14 +799,15 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
         
         try:
             ch.insert_rows(table, insert_cols, rows)
-        except Exception:
+        except (IOError, requests.exceptions.RequestException) as e:
             log.exception("CDC: insert failed, refreshing schema and retrying once for %s", table)
             insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
             table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
             # Retry the insert with updated schema
             ch.insert_rows(table, insert_cols, rows)
         
-        log.info("CDC: inserted %d row(s) into %s (UPDATE->upsert)", len(rows), table)
+        if mig_cfg.get('debug'):
+            log.info("CDC: inserted %d row(s) into %s (UPDATE->upsert)", len(rows), table)
         return len(rows)
     
     elif isinstance(event, DeleteRowsEvent) or event.__class__.__name__ == "DeleteRowsEvent":
@@ -804,14 +821,15 @@ def _process_batched_event(event, mysql_client: MySQLClient, ch: CHClient, table
         
         try:
             ch.insert_rows(table, insert_cols, rows)
-        except Exception:
+        except (IOError, requests.exceptions.RequestException) as e:
             log.exception("CDC: insert failed, refreshing (deleting) schema and retrying once for %s", table)
             insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, table, mig_cfg)
             table_cache[table] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
             # Retry the insert with updated schema
             ch.insert_rows(table, insert_cols, rows)
         
-        log.info("CDC: inserted %d tombstone row(s) into %s (DELETE)", len(rows), table)
+        if mig_cfg.get('debug'):
+            log.info("CDC: inserted %d tombstone row(s) into %s (DELETE)", len(rows), table)
         return len(rows)
     
     return 0
@@ -823,7 +841,7 @@ def run_cdc(cfg):
     
     # Initialize notifications
     notification_config = cfg.get("notifications", {})
-    environment = cfg.get("environment", "local")
+    environment = cfg.get("environment", "prod")
     initialize_notifications(notification_config, environment)
     
     # Send startup notification
@@ -911,9 +929,10 @@ def run_cdc(cfg):
                 # Get all events from queue
                 events = event_queue.get_all()
                 if events:
-                    log.info("CDC: processing queue (time since last process: %.1fs, queue size: %d)", 
-                            now - last_queue_process_time, len(events))
-                    log.info("CDC: processing %d events from queue", len(events))
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: processing queue (time since last process: %.1fs, queue size: %d)", 
+                                now - last_queue_process_time, len(events))
+                        log.info("CDC: processing %d events from queue", len(events))
                     
                     # Group events by table and operation type
                     for event in events:
@@ -922,11 +941,13 @@ def run_cdc(cfg):
                     # Get grouped events and process them
                     groups = event_grouper.get_groups()
                     if groups:
-                        log.info("CDC: processing %d groups", len(groups))
+                        if mig_cfg.get('debug'):
+                            log.info("CDC: processing %d groups", len(groups))
                         try:
                             rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
                             rows_since_checkpoint += rows_processed
-                            log.info("CDC: successfully processed %d rows from queue", rows_processed)
+                            if mig_cfg.get('debug'):
+                                log.info("CDC: successfully processed %d rows from queue", rows_processed)
                             
                             # Reset reconnection counters on successful event processing
                             if stream_reconnect_attempts > 0:
@@ -958,7 +979,8 @@ def run_cdc(cfg):
                             # Exit with error code to trigger Kubernetes restart
                             sys.exit(1)
                     else:
-                        log.info("CDC: no data events to process from queue")
+                        if mig_cfg.get('debug'):
+                            log.info("CDC: no data events to process from queue")
                 # Don't log anything when queue is empty - reduces noise
                 
                 last_queue_process_time = now
@@ -976,7 +998,7 @@ def run_cdc(cfg):
                         last_heartbeat_time = now
                     
                     continue
-            except Exception as e:
+            except (mysql.connector.Error, IOError) as e:
                 # Check if this is a connection-related error that requires stream reconnection
                 error_str = str(e).lower()
                 connection_errors = ['connection', 'timeout', 'lost', 'broken', 'closed', 'reset', 'refused']
@@ -1000,7 +1022,7 @@ def run_cdc(cfg):
                         try:
                             mysql_client.connect()
                             log.info("CDC: MySQL connection test successful")
-                        except Exception as mysql_e:
+                        except mysql.connector.Error as mysql_e:
                             log.warning("CDC: MySQL connection test failed: %s", mysql_e)
                             raise mysql_e
                         
@@ -1016,7 +1038,7 @@ def run_cdc(cfg):
                         # For now, continue with current attempt count and delay
                         # The counters will be reset when we successfully process events
                         continue
-                    except Exception as reconnect_e:
+                    except (mysql.connector.Error, IOError) as reconnect_e:
                         log.error("CDC: Stream reconnection failed (attempt %d): %s", stream_reconnect_attempts, reconnect_e)
                         # Exponential backoff
                         reconnect_delay = min(reconnect_delay * 2, 60.0)  # Cap at 60 seconds
@@ -1069,21 +1091,16 @@ def run_cdc(cfg):
                         log.debug("CDC: Filtered out noisy QueryEvent: %s", query_text[:100])
                 
                 if should_log_event:
-                    log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC event: %s schema=%s table=%s", event.__class__.__name__, schema, table)
                     # Update heartbeat when we process meaningful events
                     last_heartbeat_time = time.time()
                 
                 # Debug: Log more details for data events
                 if hasattr(event, 'rows') and event.rows:
-                    log.info("CDC: data event with %d rows", len(event.rows))
-                    # Log first row details for debugging
-                    if len(event.rows) > 0:
-                        first_row = event.rows[0]
-                        if 'values' in first_row:
-                            log.info("CDC: first row values: %s", first_row['values'])
-                        if 'after_values' in first_row:
-                            log.info("CDC: first row after_values: %s", first_row['after_values'])
-                
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: data event with %d rows", len(event.rows))
+
                 # Process DDL events immediately (don't queue them)
                 if isinstance(event, QueryEvent):
                     # DDL: best-effort schema sync (same logic as before)
@@ -1101,34 +1118,39 @@ def run_cdc(cfg):
                         # Fixed regex to properly handle IF EXISTS clause and avoid matching "if" as table name
                         # First, remove IF EXISTS and IF NOT EXISTS clauses to avoid confusion
                         query_clean = re.sub(r'\bif\s+(?:not\s+)?exists\s+', '', query_lower)
-                        log.info("CDC: original query: %s, cleaned query: %s", query_lower, query_clean)
+                        if mig_cfg.get('debug'):
+                            log.info("CDC: original query: %s, cleaned query: %s", query_lower, query_clean)
                         m = re.search(r"(?:alter|create|drop)\s+table\s+(?:`?([a-zA-Z0-9_]+)`?\.)?`?([a-zA-Z0-9_]+)`?", query_clean)
                         if m:
                             matched_schema = m.group(1) if m.group(1) else (schema.decode() if isinstance(schema, (bytes, bytearray)) else (schema or mysql_cfg["database"]))
                             affected = m.group(2)
-                            log.info("CDC: regex matched - schema: %s, table: %s (original query: %s)", matched_schema, affected, query_lower[:100])
+                            if mig_cfg.get('debug'):
+                                log.info("CDC: regex matched - schema: %s, table: %s (original query: %s)", matched_schema, affected, query_lower[:100])
                         else:
                             matched_schema = (schema.decode() if isinstance(schema, (bytes, bytearray)) else (schema or mysql_cfg["database"]))
                             affected = table
                             log.warning("CDC: regex did not match for DDL query: %s", query_lower[:100])
-                    except Exception:
+                    except (ValueError, IndexError):
                         matched_schema = (schema.decode() if isinstance(schema, (bytes, bytearray)) else (schema or mysql_cfg["database"]))
                         affected = table
                         log.exception("CDC: error extracting table name from query: %s", query_lower[:100])
                     
                     # Only react if the DDL targets our database and table of interest
-                    log.info("CDC: DDL filtering - matched_schema: %s, mysql_db: %s, affected: %s, included: %s, excluded: %s",
-                             matched_schema, mysql_cfg["database"], affected, included, excluded)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: DDL filtering - matched_schema: %s, mysql_db: %s, affected: %s, included: %s, excluded: %s",
+                                 matched_schema, mysql_cfg["database"], affected, included, excluded)
                     if matched_schema == mysql_cfg["database"] and affected and (not included or affected in included) and affected not in excluded:
                         # Handle different DDL operations separately (same logic as before)
                         if query_lower.startswith("create table"):
                             # CREATE TABLE: Create the table in ClickHouse
                             try:
-                                log.info("CDC: detected CREATE TABLE for %s, creating table in ClickHouse", affected)
+                                if mig_cfg.get('debug'):
+                                    log.info("CDC: detected CREATE TABLE for %s, creating table in ClickHouse", affected)
                                 insert_cols, cols_meta, pk_cols = _ensure_table_and_columns(mysql_client, ch, affected, mig_cfg)
                                 table_cache[affected] = (insert_cols, [c["COLUMN_NAME"] for c in cols_meta])
-                                log.info("CDC: created table %s in ClickHouse", affected)
-                                log.info("CDC: table %s columns: %s", affected, table_cache[affected])
+                                if mig_cfg.get('debug'):
+                                    log.info("CDC: created table %s in ClickHouse", affected)
+                                    log.info("CDC: table %s columns: %s", affected, table_cache[affected])
                                 
                                 # Send notification for successful table creation
                                 notify_cdc_info(
@@ -1141,7 +1163,7 @@ def run_cdc(cfg):
                                         "Primary Keys": pk_cols
                                     }
                                 )
-                            except Exception as e:
+                            except (mysql.connector.Error, IOError, requests.exceptions.RequestException) as e:
                                 log.exception("CDC: failed to create table %s in ClickHouse", affected)
                                 
                                 # Send notification for table creation failure
@@ -1160,12 +1182,14 @@ def run_cdc(cfg):
                         elif query_lower.startswith("drop table"):
                             # DROP TABLE: Drop the table from ClickHouse
                             try:
-                                log.info("CDC: detected DROP TABLE for %s, dropping table in ClickHouse", affected)
+                                if mig_cfg.get('debug'):
+                                    log.info("CDC: detected DROP TABLE for %s, dropping table in ClickHouse", affected)
                                 ch.execute(f"DROP TABLE IF EXISTS `{affected}`")
                                 # Remove from cache if it exists
                                 if affected in table_cache:
                                     del table_cache[affected]
-                                log.info("CDC: dropped table %s in ClickHouse", affected)
+                                if mig_cfg.get('debug'):
+                                    log.info("CDC: dropped table %s in ClickHouse", affected)
                                 
                                 # Send notification for successful table drop
                                 notify_cdc_info(
@@ -1177,7 +1201,7 @@ def run_cdc(cfg):
                                         "Operation": "DROP TABLE"
                                     }
                                 )
-                            except Exception as e:
+                            except (IOError, requests.exceptions.RequestException) as e:
                                 log.exception("CDC: failed to drop table %s in ClickHouse", affected)
                                 
                                 # Send notification for table drop failure
@@ -1202,13 +1226,16 @@ def run_cdc(cfg):
 
                 # Handle data events (INSERT/UPDATE/DELETE)
                 if not table:
-                    log.info("CDC: skipping event without table: %s", event.__class__.__name__)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: skipping event without table: %s", event.__class__.__name__)
                     continue
                 if included and table not in included:
-                    log.info("CDC: skipping table %s (not in include_tables)", table)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: skipping table %s (not in include_tables)", table)
                     continue
                 if table in excluded:
-                    log.info("CDC: skipping table %s (in exclude_tables)", table)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: skipping table %s (in exclude_tables)", table)
                     continue
                 
                 # Add event to queue or process immediately
@@ -1216,13 +1243,15 @@ def run_cdc(cfg):
                     # Add to queue for later processing
                     event_queue.put(event)
                     row_count = len(getattr(event, 'rows', []))
-                    log.info("CDC: event queued for %s.%s (%s) with %d rows - queue size: %d (batch_delay: %ds)", 
-                            schema, table, event.__class__.__name__, row_count, event_queue.size(), batch_delay_seconds)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: event queued for %s.%s (%s) with %d rows - queue size: %d (batch_delay: %ds)", 
+                                schema, table, event.__class__.__name__, row_count, event_queue.size(), batch_delay_seconds)
                 else:
                     # Process immediately
                     row_count = len(getattr(event, 'rows', []))
-                    log.info("CDC: processing event immediately for %s.%s (%s) with %d rows", 
-                            schema, table, event.__class__.__name__, row_count)
+                    if mig_cfg.get('debug'):
+                        log.info("CDC: processing event immediately for %s.%s (%s) with %d rows", 
+                                schema, table, event.__class__.__name__, row_count)
                     try:
                         rows_processed = _process_batched_event(event, mysql_client, ch, table_cache, mig_cfg)
                         rows_since_checkpoint += rows_processed
@@ -1234,7 +1263,7 @@ def run_cdc(cfg):
                             log.info("CDC: Resetting reconnection counters after successful immediate event processing")
                             stream_reconnect_attempts = 0
                             reconnect_delay = 1.0
-                    except Exception as e:
+                    except (IOError, requests.exceptions.RequestException, mysql.connector.Error) as e:
                         log.critical("CDC: Critical error processing event immediately - %s", str(e))
                         # Send critical error notification with query pools
                         query_pools = _get_query_pools_for_error()
@@ -1270,7 +1299,7 @@ def run_cdc(cfg):
                         os.makedirs(os.path.dirname(checkpoint_file) or ".", exist_ok=True)
                         with open(checkpoint_file, "w", encoding="utf-8") as fp:
                             json.dump({"binlog_file": f, "binlog_pos": p}, fp, indent=2)
-                    except Exception:
+                    except (IOError, TypeError):
                         log.exception("Failed to write checkpoint file")
                     rows_since_checkpoint = 0
                     last_checkpoint_time = now
@@ -1278,7 +1307,7 @@ def run_cdc(cfg):
             except CriticalCDCError:
                 # Re-raise CriticalCDCError to ensure process exits
                 raise
-            except Exception:
+            except (IOError, requests.exceptions.RequestException, mysql.connector.Error, ValueError, TypeError, KeyError):
                 log.exception("Error handling binlog event")
                 time.sleep(1)
     finally:
@@ -1289,14 +1318,16 @@ def run_cdc(cfg):
         if batch_delay_seconds > 0:
             remaining_events = event_queue.get_all()
             if remaining_events:
-                log.info("CDC: processing %d remaining events from queue", len(remaining_events))
+                if mig_cfg.get('debug'):
+                    log.info("CDC: processing %d remaining events from queue", len(remaining_events))
                 for event in remaining_events:
                     event_grouper.add_event(event)
                 groups = event_grouper.get_groups()
                 if groups:
                     try:
                         rows_processed = _process_grouped_events(groups, mysql_client, ch, table_cache, mig_cfg)
-                        log.info("CDC: processed %d final rows from queue", rows_processed)
+                        if mig_cfg.get('debug'):
+                            log.info("CDC: processed %d final rows from queue", rows_processed)
                     except CriticalCDCError as e:
                         log.critical("CDC: Critical error in final processing - %s", str(e))
                         # Send critical error notification with query pools
@@ -1324,15 +1355,13 @@ def run_cdc(cfg):
         
         try:
             stream.close()
-        except Exception:
+        except (IOError, mysql.connector.Error):
             pass
         try:
             ch.close()
-        except Exception:
+        except (IOError, requests.exceptions.RequestException):
             pass
         try:
             mysql_client.close()
-        except Exception:
+        except mysql.connector.Error:
             pass
-
-

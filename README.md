@@ -162,6 +162,7 @@ clickhouse:
 
 migration:
   mode: "snapshot"  # or "cdc"
+  debug: false # enables verbose logging for CDC events
   batch_rows: 5000
   workers: 4
   low_cardinality_strings: true
@@ -228,6 +229,9 @@ export MYSQL_PASSWORD=your-password
 # ClickHouse configuration  
 export CLICKHOUSE_HOST=clickhouse-server.example.com
 export CLICKHOUSE_PASSWORD=your-password
+
+# Migration configuration
+export MIGRATION_DEBUG=true
 
 # Notifications
 export NOTIFICATIONS_ENABLED=true
@@ -402,8 +406,7 @@ DROP TABLE old_table;
 
 Enable detailed logging by setting log level in your config or environment:
 ```bash
-export PYTHONPATH=/app
-export LOG_LEVEL=DEBUG
+export MIGRATION_DEBUG=true
 docker compose up
 ```
 

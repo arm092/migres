@@ -1,6 +1,7 @@
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import mysql.connector
 from mysql_client import MySQLClient
 from clickhouse_client import CHClient
 from schema_and_ddl import build_table_ddl
@@ -40,8 +41,8 @@ def _process_table_worker(table, cfg, state: StateJson):
         try:
             ch.execute(f"DROP TABLE IF EXISTS `{table}`")
             log.info("Worker: dropped existing ClickHouse table %s (if any)", table)
-        except Exception:
-            log.exception("Worker: failed to drop ClickHouse table %s (continuing)", table)
+        except (IOError, OSError) as e:
+            log.exception("Worker: failed to drop ClickHouse table %s (continuing): %s", table, e)
 
         # build DDL and insertable columns
         ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, mig_cfg)
@@ -122,14 +123,17 @@ def _process_table_worker(table, cfg, state: StateJson):
 
         state.mark_table_done(table)
         log.info("Worker: table %s migrated successfully", table)
-    except Exception:
-        log.exception("Worker: error while processing table %s", table)
+    except mysql.connector.Error as e:
+        log.exception("Worker: MySQL error while processing table %s: %s", table, e)
+        raise
+    except (IOError, OSError) as e:
+        log.exception("Worker: error while processing table %s: %s", table, e)
         raise
     finally:
         try:
             cn.commit()
-        except Exception:
-            pass
+        except mysql.connector.Error as e:
+            log.warning("Worker: failed to commit for table %s: %s", table, e)
         mysql.close()
 
 def run_snapshot(cfg):
@@ -157,8 +161,8 @@ def run_snapshot(cfg):
                 import json
                 json.dump({"binlog_file": file, "binlog_pos": pos}, f, indent=2)
             log.info("Wrote binlog checkpoint to %s: %s:%s", checkpoint_file, file, pos)
-        except Exception:
-            log.exception("Failed to write checkpoint file")
+        except (IOError, TypeError) as e:
+            log.exception("Failed to write checkpoint file: %s", e)
 
     # 2) We will not hold a single global transaction when processing tables in parallel.
     #    Instead, each worker opens its own connection and starts a REPEATABLE READ transaction
@@ -180,13 +184,13 @@ def run_snapshot(cfg):
             tbl = futures[fut]
             try:
                 fut.result()
-            except Exception:
-                log.exception("Table %s failed in worker", tbl)
+            except (mysql.connector.Error, IOError, OSError) as e:
+                log.exception("Table %s failed in worker: %s", tbl, e)
 
     # 5) finalize
     try:
         master_cn.commit()
-    except Exception:
-        pass
+    except mysql.connector.Error as e:
+        log.warning("Failed to commit master connection: %s", e)
     master_mysql.close()
     log.info("Snapshot completed for all tables.")

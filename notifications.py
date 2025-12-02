@@ -21,24 +21,40 @@ class NotificationLevel(Enum):
     CRITICAL = "critical"
 
 
+def _get_environment_color(environment: str) -> str:
+    """
+    Get color based on environment value (case-insensitive)
+    
+    Args:
+        environment: Environment name (dev, stage, prod, production)
+        
+    Returns:
+        Color name for Adaptive Card: "Good" (green), "Warning" (yellow), or "Attention" (red)
+    """
+    env_lower = environment.lower()
+    
+    if env_lower == "dev":
+        return "Good"  # Green
+    elif env_lower == "stage":
+        return "Warning"  # Yellow/Orange
+    elif env_lower in ("prod", "production"):
+        return "Attention"  # Red
+    else:
+        # Default to green for unknown environments
+        return "Good"
+
+
 def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
-                          details: Optional[Dict] = None) -> Dict:
+                          details: Optional[Dict] = None, environment: str = "prod") -> Dict:
     """Create MS Teams adaptive card payload"""
 
     # Remove emojis from title (MS Teams webhooks can have issues with emojis in adaptive cards)
     # Keep emojis for display but use clean text for adaptive card
     clean_title = title
     # Optionally strip emojis if needed, but let's try keeping them first
-    
-    # Color coding based on level - use standard Adaptive Card colors
-    color_map = {
-        NotificationLevel.INFO: "Good",      # Green
-        NotificationLevel.WARNING: "Warning",  # Orange
-        NotificationLevel.ERROR: "Attention",    # Red
-        NotificationLevel.CRITICAL: "Attention"  # Dark Red
-    }
 
-    color = color_map.get(level, "Good")
+    # Color coding based on environment (not level)
+    color = _get_environment_color(environment)
 
     # Create adaptive card body
     body = [
@@ -82,7 +98,7 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
             if len(value_str) > 500:
                 value_str = value_str[:500] + "... (truncated)"
             details_items.append(f"{key}: {value_str}")
-        
+
         details_text = "\n".join(details_items)
         body.append({
             "type": "TextBlock",
@@ -112,47 +128,47 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
 
 class TeamsNotification:
     """MS Teams notification handler"""
-    
-    def __init__(self, webhook_url: str, enabled: bool = True, rate_limit_seconds: int = 60, environment: str = "local"):
+
+    def __init__(self, webhook_url: str, enabled: bool = True, rate_limit_seconds: int = 60, environment: str = "prod"):
         """
         Initialize MS Teams notification handler
-        
+
         Args:
             webhook_url: MS Teams webhook URL
             enabled: Whether notifications are enabled
             rate_limit_seconds: Minimum seconds between notifications (0 = no limit)
-            environment: Environment name (e.g., "local", "prod") - will be shown in titles as [ENVIRONMENT]
+            environment: Environment name (e.g., "dev", "prod") - will be shown in titles as [ENVIRONMENT]
         """
         self.webhook_url = webhook_url
         self.enabled = enabled
         self.rate_limit_seconds = rate_limit_seconds
         self.environment = environment.upper()
         self.last_notification_time = {}
-    
+
     def _format_title(self, title: str) -> str:
         """Format notification title with environment tag"""
         return f"{title} [{self.environment}]"
-        
+
     def _should_send_notification(self, notification_type: str) -> bool:
         """Check if notification should be sent based on rate limiting"""
         if not self.enabled:
             return False
-            
+
         if self.rate_limit_seconds <= 0:
             return True
-            
+
         now = datetime.now()
         last_time = self.last_notification_time.get(notification_type)
-        
+
         if last_time is None:
             self.last_notification_time[notification_type] = now
             return True
-            
+
         time_diff = (now - last_time).total_seconds()
         if time_diff >= self.rate_limit_seconds:
             self.last_notification_time[notification_type] = now
             return True
-            
+
         return False
 
     def send_notification(self, title: str, message: str, level: NotificationLevel = NotificationLevel.INFO,
@@ -175,12 +191,8 @@ class TeamsNotification:
             return False
             
         try:
-            # Create adaptive card payload
-            payload = _create_adaptive_card(title, message, level, details)
-            
-            # Debug: log payload structure (without sensitive data)
-            log.debug(f"Sending MS Teams notification payload: {json.dumps(payload, indent=2)}")
-            
+            # Create adaptive card payload (use environment for color, not level)
+            payload = _create_adaptive_card(title, message, level, details, self.environment)
             # Send to MS Teams
             response = requests.post(
                 self.webhook_url,
@@ -191,7 +203,7 @@ class TeamsNotification:
             # MS Teams webhooks return 200 with body "1" on success
             # They can also return 200 with error messages, so check the body
             response_text = response.text.strip() if response.text else ""
-            
+
             if response.status_code == 200:
                 # Check if response indicates success (MS Teams returns "1" on success)
                 if response_text == "1":
@@ -215,13 +227,12 @@ class TeamsNotification:
                     error_msg += f", Response: {response_text}"
                 
                 log.error(error_msg)
-                log.debug(f"Full response: status={response.status_code}, headers={response.headers}, body={response_text}")
                 return False
                 
         except requests.exceptions.RequestException as e:
             log.error(f"Error sending MS Teams notification: {e}")
             return False
-        except Exception as e:
+        except (TypeError, ValueError) as e:
             log.error(f"Unexpected error sending MS Teams notification: {e}")
             return False
     
@@ -328,14 +339,14 @@ class TeamsNotification:
         )
 
 
-def create_notification_handler(config: Dict, environment: str = "local") -> Optional[TeamsNotification]:
+def create_notification_handler(config: Dict, environment: str = "prod") -> Optional[TeamsNotification]:
     """
     Create notification handler from configuration
     
     Args:
         config: Notification configuration dictionary
-        environment: Environment name (default: "local")
-        
+        environment: Environment name (default: "prod")
+
     Returns:
         TeamsNotification instance or None if disabled
     """
@@ -362,14 +373,14 @@ def create_notification_handler(config: Dict, environment: str = "local") -> Opt
 _notification_handler: Optional[TeamsNotification] = None
 
 
-def initialize_notifications(config: Dict, environment: str = "local") -> bool:
+def initialize_notifications(config: Dict, environment: str = "prod") -> bool:
     """
     Initialize global notification handler
     
     Args:
         config: Notification configuration
-        environment: Environment name (default: "local")
-    
+        environment: Environment name (default: "prod")
+
     Returns:
         bool: True if initialized successfully
     """

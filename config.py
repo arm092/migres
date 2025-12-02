@@ -13,6 +13,7 @@ def load_config(path):
 
     # defaults
     cfg.setdefault("migration", {})
+    cfg["migration"].setdefault("debug", False)
     cfg["migration"].setdefault("batch_rows", 5000)
     cfg["migration"].setdefault("mode", "snapshot")
     cfg.setdefault("checkpoint_file", "/app/binlog_checkpoint.json")
@@ -30,6 +31,14 @@ def load_config(path):
 def _apply_env_overrides(cfg):
     """Apply environment variable overrides to configuration"""
     
+    # Migration configuration overrides
+    if "migration" not in cfg:
+        cfg["migration"] = {}
+    
+    if "MIGRATION_DEBUG" in os.environ:
+        cfg["migration"]["debug"] = os.environ["MIGRATION_DEBUG"].lower() in ("true", "1", "yes", "on")
+        log.info(f"Override: migration.debug = {cfg['migration']['debug']}")
+
     # MySQL configuration overrides
     if "mysql" not in cfg:
         cfg["mysql"] = {}
@@ -79,10 +88,6 @@ def _apply_env_overrides(cfg):
                     continue
             cfg["clickhouse"][config_key] = value
             log.info(f"Override: clickhouse.{config_key} = {value}")
-    
-    # Migration configuration overrides
-    if "migration" not in cfg:
-        cfg["migration"] = {}
     
     migration_overrides = {
         "MIGRATION_MODE": "mode",
@@ -163,11 +168,11 @@ def _apply_env_overrides(cfg):
             cfg[config_key] = os.environ[env_var]
             log.info(f"Override: {config_key} = {os.environ[env_var]}")
     
-    # Environment variable (default: local)
+    # Environment variable (default: prod)
     if "ENVIRONMENT" in os.environ:
         cfg["environment"] = os.environ["ENVIRONMENT"]
         log.info(f"Override: environment = {cfg['environment']}")
     else:
-        cfg.setdefault("environment", "local")
+        cfg.setdefault("environment", "prod")
     
     return cfg
