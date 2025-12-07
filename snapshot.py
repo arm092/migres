@@ -2,6 +2,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import mysql.connector
+from mysql.connector import Error as MySQLError
 from mysql_client import MySQLClient
 from clickhouse_client import CHClient
 from schema_and_ddl import build_table_ddl
@@ -20,8 +21,8 @@ def _process_table_worker(table, cfg, state: StateJson):
     batch = int(mig_cfg.get("batch_rows", 5000))
 
     # Per-thread clients
-    mysql = MySQLClient(mysql_cfg)
-    cn = mysql.connect()
+    mysql_client = MySQLClient(mysql_cfg)
+    cn = mysql_client.connect()
     ch = CHClient(ch_cfg, mig_cfg)
 
     try:
@@ -32,7 +33,7 @@ def _process_table_worker(table, cfg, state: StateJson):
             return
 
         # introspect columns & pk
-        cols_meta, pk_cols = mysql.get_table_columns_and_pk(table)
+        cols_meta, pk_cols = mysql_client.get_table_columns_and_pk(table)
         mysql_cols = [c["COLUMN_NAME"] for c in cols_meta]
         log.info("Worker: %s columns: %s; pk: %s", table, mysql_cols, pk_cols)
 
@@ -84,7 +85,7 @@ def _process_table_worker(table, cfg, state: StateJson):
             log.info("Worker: using PK method for table %s on %s", table, pk_col)
             last_pk = state.get_table(table).get("last_pk", None)
             while True:
-                rows = mysql.fetch_rows_by_pk(table, insert_cols[:-2], pk_col, last_pk, batch)
+                rows = mysql_client.fetch_rows_by_pk(table, insert_cols[:-2], pk_col, last_pk, batch)
                 if not rows:
                     break
                 out_rows = []
@@ -109,7 +110,7 @@ def _process_table_worker(table, cfg, state: StateJson):
             log.info("Worker: using offset pagination for table %s", table)
             offset = state.get_table(table).get("rows_processed", 0)
             while True:
-                rows = mysql.fetch_stream_with_offset(table, insert_cols[:-2], offset, batch)
+                rows = mysql_client.fetch_stream_with_offset(table, insert_cols[:-2], offset, batch)
                 if not rows:
                     break
                 out_rows = []
@@ -123,7 +124,7 @@ def _process_table_worker(table, cfg, state: StateJson):
 
         state.mark_table_done(table)
         log.info("Worker: table %s migrated successfully", table)
-    except mysql.connector.Error as e:
+    except MySQLError as e:
         log.exception("Worker: MySQL error while processing table %s: %s", table, e)
         raise
     except (IOError, OSError) as e:
@@ -132,15 +133,14 @@ def _process_table_worker(table, cfg, state: StateJson):
     finally:
         try:
             cn.commit()
-        except mysql.connector.Error as e:
+        except MySQLError as e:
             log.warning("Worker: failed to commit for table %s: %s", table, e)
-        mysql.close()
+        mysql_client.close()
 
 def run_snapshot(cfg):
     mysql_cfg = cfg["mysql"]
     mig_cfg = cfg.get("migration", {})
     workers = int(mig_cfg.get("workers", 4))
-    checkpoint_file = cfg.get("checkpoint_file")
     state_file = cfg.get("state_file")
 
     state = StateJson(state_file)
@@ -156,13 +156,6 @@ def run_snapshot(cfg):
     else:
         file, pos = master_status
         state.set_binlog(file, pos)
-        try:
-            with open(checkpoint_file, "w", encoding="utf-8") as f:
-                import json
-                json.dump({"binlog_file": file, "binlog_pos": pos}, f, indent=2)
-            log.info("Wrote binlog checkpoint to %s: %s:%s", checkpoint_file, file, pos)
-        except (IOError, TypeError) as e:
-            log.exception("Failed to write checkpoint file: %s", e)
 
     # 2) We will not hold a single global transaction when processing tables in parallel.
     #    Instead, each worker opens its own connection and starts a REPEATABLE READ transaction
@@ -184,13 +177,13 @@ def run_snapshot(cfg):
             tbl = futures[fut]
             try:
                 fut.result()
-            except (mysql.connector.Error, IOError, OSError) as e:
+            except (MySQLError, IOError, OSError) as e:
                 log.exception("Table %s failed in worker: %s", tbl, e)
 
     # 5) finalize
     try:
         master_cn.commit()
-    except mysql.connector.Error as e:
+    except MySQLError as e:
         log.warning("Failed to commit master connection: %s", e)
     master_mysql.close()
     log.info("Snapshot completed for all tables.")

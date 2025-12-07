@@ -16,7 +16,6 @@ def load_config(path):
     cfg["migration"].setdefault("debug", False)
     cfg["migration"].setdefault("batch_rows", 5000)
     cfg["migration"].setdefault("mode", "snapshot")
-    cfg.setdefault("checkpoint_file", "/app/binlog_checkpoint.json")
     cfg.setdefault("state_file", "/app/state.json")
     
     # CDC defaults
@@ -159,7 +158,6 @@ def _apply_env_overrides(cfg):
     
     # File path overrides
     file_overrides = {
-        "CHECKPOINT_FILE": "checkpoint_file",
         "STATE_FILE": "state_file"
     }
     

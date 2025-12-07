@@ -304,9 +304,9 @@ class TeamsNotification:
     
     def send_cdc_startup(self, config_summary: Dict) -> bool:
         """Send CDC startup notification"""
-        title = self._format_title("🚀 CDC Process Started")
-        message = "CDC (Change Data Capture) process has started successfully"
-        
+        title = self._format_title("🚀 Migres Started")
+        message = "Migres process (CDC/Snapshot) has started successfully"
+
         details = {
             "Startup Time": datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
             "Configuration": config_summary

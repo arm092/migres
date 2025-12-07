@@ -1,14 +1,32 @@
 import mysql.connector
 import logging
+import threading
 
 log = logging.getLogger(__name__)
 
 class MySQLClient:
+    # Thread-local storage for instances (each thread gets its own)
+    _local = threading.local()
+    _connection_logged = set()  # Track which configs have logged connection (shared across threads)
+    _log_lock = threading.Lock()
+    
     def __init__(self, cfg):
         self.cfg = cfg
         self.cn = None
+        self._config_key = (cfg["host"], cfg.get("port", 3306), cfg["user"], cfg["database"])
+        
+        # Check if this config has logged connection before (across all threads)
+        with self._log_lock:
+            self._should_log_connection = self._config_key not in self._connection_logged
+            if self._should_log_connection:
+                self._connection_logged.add(self._config_key)
 
     def connect(self):
+        # Only log connection once per unique config (across all threads)
+        if self._should_log_connection:
+            log.info("MySQL connected: %s:%s/%s", self.cfg["host"], self.cfg.get("port", 3306), self.cfg["database"])
+            self._should_log_connection = False  # Don't log again for this instance
+        
         self.cn = mysql.connector.connect(
             host=self.cfg["host"],
             port=self.cfg.get("port", 3306),
@@ -19,7 +37,6 @@ class MySQLClient:
             use_unicode=True,
             autocommit=False,
         )
-        log.info("MySQL connected: %s:%s/%s", self.cfg["host"], self.cfg.get("port", 3306), self.cfg["database"])
         return self.cn
 
     def close(self):
