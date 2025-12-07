@@ -5,34 +5,54 @@ This directory contains test scripts for the CDC (Change Data Capture) batching 
 ## Test Files
 
 - **`test_cdc_batching.py`** - Main CDC batching test with 5000 INSERT/UPDATE/DELETE operations
-- **`test_forced_errors.py`** - Forced error test that creates ClickHouse constraints that will definitely fail
 - **`test_notifications.py`** - MS Teams notification system test
-- **`run_test.py`** - Test runner script to execute different test scenarios
+- **`test_data_integrity.py`** - Data integrity test with checksum verification
+- **`test_crash_recovery.py`** - Crash recovery scenarios test
+- **`test_network_failure.py`** - Network failure and reconnection test
+- **`test_ordering.py`** - Event ordering test
+- **`test_schema_evolution.py`** - Schema evolution (DDL) test
+- **`test_edge_cases.py`** - Edge cases test (NULLs, unicode, large fields)
+- **`test_stress.py`** - Stress test with high volume operations
+- **`test_pipeline_reliability.py`** - Pipeline reliability test
+- **`test_buffer_overflow.py`** - Buffer overflow scenarios test
+- **`test_partial_failures.py`** - Partial batch failures test
+- **`test_consumer_retry.py`** - Consumer retry logic test
+- **`test_clickhouse_failures.py`** - ClickHouse connection failures test
+- **`test_binlog_rotation.py`** - Binlog rotation test
+- **`test_transaction_rollback.py`** - Transaction rollback test
+- **`test_checkpoint_corruption.py`** - Checkpoint corruption recovery test
+- **`test_schema_mismatch.py`** - Schema mismatch handling test
 - **`monitor_cdc.py`** - Real-time monitoring script to watch ClickHouse table counts
 
 ## How to Run Tests
 
 ### Prerequisites
-1. Make sure CDC process is running: `python migres.py`
-2. Ensure MySQL and ClickHouse are accessible
+1. Ensure MySQL and ClickHouse are accessible
+2. Tests will automatically start/stop migres process as needed
 
 ### Running Tests
 
-#### Option 1: Use the test runner
+#### Using pytest (Recommended)
 ```bash
-cd test
-python run_test.py
+# Run all tests
+pytest test/
+
+# Run specific test file
+pytest test/test_data_integrity.py
+
+# Run with verbose output
+pytest test/ -v
+
+# Run specific test
+pytest test/test_ordering.py::test_insert_then_update -v
+
+# Run tests by marker
+pytest test/ -m integration
+pytest test/ -m slow
+pytest test/ -m crash
 ```
 
-#### Option 2: Run individual tests
-```bash
-cd test
-python test_cdc_batching.py
-python test_forced_errors.py
-python test_notifications.py
-```
-
-#### Option 3: Monitor CDC processing
+#### Monitor CDC processing
 ```bash
 cd test
 python monitor_cdc.py
@@ -47,12 +67,6 @@ python monitor_cdc.py
 - ✅ Processes 2500 DELETE operations (as tombstones)
 - ✅ Verifies final state: 12,500 total versions, 2,500 active, 2,500 deleted
 
-### Forced Error Test (test_forced_errors.py)
-- ✅ Creates MySQL table with VARCHAR salary column
-- ✅ Waits for CDC to create ClickHouse table, then manually alters it to DECIMAL
-- ✅ Inserts string data that will cause ClickHouse DECIMAL conversion errors
-- ✅ Forces CDC to fail when trying to replicate string data to DECIMAL column
-- ✅ Generates error dump files with real SQL queries containing the actual problematic data
 
 ### Notifications Test (test_notifications.py)
 - ✅ Reads notification configuration from config.yml
