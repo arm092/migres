@@ -21,21 +21,23 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 - 🎯 **Included/excluded tables filtering**
 
 ### CDC Mode (Change Data Capture)
-- 🔄 **Real-time replication** from MySQL binlog
-- ⚡ **Queue-based event batching** with configurable delay
+- 🔄 **Real-time replication** from MySQL binlog via 3-stage pipeline architecture
+- ⚡ **Queue-based event batching** with configurable delay (SQLite buffer database)
 - 🎯 **Smart event grouping** (combines multiple events into single operations)
-- 🏗️ **Automatic schema synchronization**:
-  - ✅ CREATE TABLE (new table creation)
+- 🏗️ **Automatic schema synchronization** with retry logic:
+  - ✅ CREATE TABLE (new table creation with up to 10 retry attempts)
   - ✅ DROP TABLE (table deletion)
-  - ✅ ADD COLUMN (with defaults)
+  - ✅ ADD COLUMN (with defaults, retries if metadata not available)
+  - ✅ ALTER TABLE (enhanced retry logic with exponential backoff)
   - ✅ DROP COLUMN
   - ✅ RENAME COLUMN (CHANGE COLUMN)
   - ✅ MODIFY COLUMN (type changes, defaults)
 - 📊 **ReplacingMergeTree** for upsert semantics
-- 🎯 **Table filtering** (include/exclude)
-- 💾 **Checkpoint persistence** (resume from last position)
+- 🎯 **Table filtering** (include/exclude) - events for excluded tables are automatically skipped
+- 💾 **Checkpoint persistence** (resume from last committed position)
+- 🔒 **Unique server_id per process** (PID-based) prevents MySQL replication conflicts
 - 🌍 **Timezone-aware datetime handling** (DateTime64 with timezone)
-- 🛡️ **Error handling** with failed operation dumps
+- 🛡️ **Robust error handling** - failed queries moved to `failed_queries` table, don't block CDC sync
 - 📱 **MS Teams notifications** for errors, warnings, and important events
 
 ### Operations
@@ -71,39 +73,51 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
    - Runs snapshot mode first if `snapshot_before: true`
    - Ensures complete baseline before streaming
 
-2. **Queue-based event processing**
-   - Events are accumulated in a queue as they arrive from binlog
+2. **3-Stage Pipeline Architecture**
+   - **Producer**: Reads events from MySQL binlog stream and stores them in buffer
+   - **Transformer**: Processes raw events, generates SQL queries, handles DDL operations
+   - **Consumer**: Executes queries against ClickHouse, handles failures gracefully
+   - All stages run in parallel threads for optimal performance
+
+3. **Queue-based event processing**
+   - Events are accumulated in a SQLite buffer database as they arrive from binlog
    - Timer-based processing every `batch_delay_seconds` (configurable)
    - Continuous operation: keeps receiving events while processing queue
+   - Events for tables not in `include_tables` are automatically filtered to prevent buffer accumulation
 
-3. **Event batching and grouping**
+4. **Event batching and grouping**
    - **INSERT events**: Multiple INSERTs for same table → Single INSERT with multiple rows
    - **UPDATE events**: Multiple UPDATEs for same table → Single INSERT with multiple rows
    - **DELETE events**: Multiple DELETEs for same table → Single INSERT with multiple rows
-   - **DDL events**: Processed immediately (not queued)
+   - **DDL events**: Processed immediately with retry logic for reliability
 
-4. **Real-time streaming**
+5. **Real-time streaming**
    - Connects to MySQL binlog stream (non-blocking)
+   - Unique `server_id` per process (based on PID) prevents replication conflicts
    - Processes INSERT/UPDATE/DELETE events
    - Auto-detects schema changes (ADD/DROP/RENAME/MODIFY)
    - Applies changes to ClickHouse in batches
 
-5. **Schema synchronization**
-   - **CREATE TABLE**: Creates new table in ClickHouse
+6. **Schema synchronization with retry logic**
+   - **CREATE TABLE**: Creates new table in ClickHouse with retry logic (up to 10 attempts)
    - **DROP TABLE**: Removes table from ClickHouse
-   - **ADD COLUMN**: Creates new column with defaults
+   - **ADD COLUMN**: Creates new column with defaults, retries if MySQL metadata not yet available
+   - **ALTER TABLE**: Enhanced retry logic (up to 5 attempts) with exponential backoff
    - **DROP COLUMN**: Removes column from ClickHouse
    - **RENAME COLUMN**: Renames column in ClickHouse
    - **MODIFY COLUMN**: Changes type and defaults
 
-6. **Error handling**
-   - Failed operations are dumped to JSON files for manual review
-   - Includes timestamp, error details, and operation information
+7. **Error handling and reliability**
+   - Failed queries are moved to `failed_queries` table instead of blocking CDC sync
+   - Failed operations don't prevent other queries from processing
+   - Events for dropped tables are gracefully skipped
+   - Includes timestamp, error details, and operation information for manual review
    - Allows for manual recovery of failed operations
 
-7. **Checkpoint persistence**
-   - Saves binlog position periodically
-   - Resumes from last position on restart
+8. **Checkpoint persistence**
+   - Saves binlog position periodically to buffer database
+   - Resumes from last committed position on restart
+   - State persisted in both buffer database and `state.json` file
 
 ---
 
@@ -384,13 +398,16 @@ DROP TABLE old_table;
 - Ensure `server_id` is unique in your network
 
 **2. Schema changes not applied:**
-- Check logs for "CDC: synchronized schema" messages
+- Check logs for "DDL: Synchronized schema" or "DDL: Created table" messages
 - Verify table is in `include_tables` (not excluded)
 - For MODIFY COLUMN issues, check ClickHouse version compatibility
+- DDL operations have retry logic - check logs for retry attempts if schema changes are slow
 
 **3. Duplicate rows in ClickHouse:**
 - Use `SELECT * FROM table FINAL` to see deduplicated results
 - ReplacingMergeTree automatically handles duplicates on merge
+- Run `OPTIMIZE TABLE table_name FINAL` to force merge if needed
+- UPDATE events create new rows with higher `__data_transfer_commit_time` - ensure OPTIMIZE runs periodically
 
 **4. Migration stuck:**
 - Check `state.json` for incomplete tables
@@ -401,6 +418,16 @@ DROP TABLE old_table;
 - Configure `clickhouse_timezone` in config.yml
 - Ensure it matches your MySQL server timezone for consistency
 - Use `DateTime64(3, 'timezone')` for proper timezone handling
+
+**6. Events accumulating in buffer (raw_events growing):**
+- Check if tables are in `include_tables` - events for excluded tables are automatically filtered
+- Verify CDC pipeline is running (check logs for Producer/Transformer/Consumer threads)
+- Check for failed queries in `failed_queries` table that might be blocking processing
+
+**7. MySQL replication conflicts (server_id errors):**
+- Each migres process now uses unique server_id (base + PID modulo)
+- Conflicts should be resolved automatically
+- If issues persist, ensure only one migres instance connects to MySQL at a time
 
 ### Debug Mode
 
