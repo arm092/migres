@@ -54,18 +54,18 @@ class PipelineConsumer:
 
     def run(self):
         log.info("Starting Pipeline Consumer...")
-        
+
         while True:
             try:
                 # 1. Fetch Batch of Prepared Queries
                 queries = self.buffer.fetch_prepared_queries_batch(limit=100)
-                
+
                 if not queries:
                     time.sleep(self.mig_cfg.get("cdc", {}).get('batch_delay_seconds', 5))
                     continue
-                
+
                 processed_ids = []
-                
+
                 # 2. Execute Queries
                 for q in queries:
                     try:
@@ -73,7 +73,7 @@ class PipelineConsumer:
                         params = q['params']
                         table = q.get('table')
                         is_ddl = sql.strip().upper().startswith(('DROP ', 'CREATE ', 'ALTER ', 'TRUNCATE '))
-                        
+
                         # For DDL queries (like deferred DROP), execute directly
                         if is_ddl:
                             start_exec = time.time()
@@ -82,13 +82,13 @@ class PipelineConsumer:
                             log.info(f"Consumer: DDL executed: {sql[:100]}... ({exec_time:.2f}s)")
                             processed_ids.append(q['id'])
                             continue
-                        
+
                         # Verify table exists before insert (with retry)
                         if table and params:
                             max_wait = 20  # seconds
                             waited = 0
                             table_exists = False
-                            
+
                             while waited < max_wait:
                                 exists = self.ch.client.execute(
                                     f"EXISTS TABLE `{self.ch.db}`.`{table}`"
@@ -98,10 +98,11 @@ class PipelineConsumer:
                                     break
                                 time.sleep(1)
                                 waited += 1
-                                
+
                             if not table_exists:
                                 msg = f"Table {table} does not exist after {max_wait}s wait. Skipping query."
                                 log.error(msg)
+                                notify_cdc_error('Consumer Error', table, msg, {"Query ID": q['id'], "SQL": q['sql']})
                                 self.buffer.move_to_failed(q['id'], msg)
                                 continue  # Skip execution, don't add to processed_ids (handled by move_to_failed)
 
@@ -115,38 +116,40 @@ class PipelineConsumer:
                             # Handling for cases where only SQL is provided
                             self.ch.execute(sql)
                         exec_time = time.time() - start_exec
-                        log.info(f"Consumer: INSERT {len(params) if params else 1} rows into {table} ({exec_time:.2f}s)")
-                            
+                        log.info(
+                            f"Consumer: INSERT {len(params) if params else 1} rows into {table} ({exec_time:.2f}s)")
+
                         processed_ids.append(q['id'])
-                            
+
                     except Exception as e:
                         log.exception(f"Consumer failed to execute query id={q['id']}")
                         # Move failed query to failed_queries table so it doesn't block CDC sync
                         # This allows other queries to continue processing
                         error_msg = f"Execution failed: {str(e)}"
-                        try:
-                            self.buffer.move_to_failed(q['id'], error_msg)
-                            log.warning(f"Moved query id={q['id']} to failed_queries: {error_msg[:200]}")
-                        except Exception as move_err:
-                            log.error(f"Failed to move query to failed_queries: {move_err}")
-                        
+                        self.buffer.move_to_failed(q['id'], error_msg)
+                        log.warning(f"Moved query id={q['id']} to failed_queries: {error_msg}")
                         notify_cdc_error(
-                            "Consumer Error", 
-                            f"{q.get('schema')}.{q.get('table')}", 
+                            "Consumer Error",
+                            f"{q.get('schema')}.{q.get('table')}",
                             error_msg,
-                            {"Query ID": q['id'], "SQL": q['sql'][:200]}
+                            {"Query ID": q['id'], "SQL": q['sql']}
                         )
                         # Continue processing other queries in the batch instead of raising
-                        continue 
-                
-                # 3. Commit (Delete from Buffer)
+                        continue
+
+                        # 3. Commit (Delete from Buffer)
                 if processed_ids:
                     self.buffer.delete_prepared_queries(processed_ids)
                     if self.mig_cfg.get('debug'):
                         log.info(f"Consumer executed {len(processed_ids)} queries")
-                        
+
             except Exception as e:
                 log.error(f"Pipeline Consumer loop error: {str(e)}")
+                notify_cdc_error(
+                    "Consumer Error",
+                    "N/A",
+                    str(e)
+                )
                 time.sleep(1)
 
             time.sleep(self.mig_cfg.get("cdc", {}).get('batch_delay_seconds', 15))
