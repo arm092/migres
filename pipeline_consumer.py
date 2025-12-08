@@ -53,7 +53,8 @@ class PipelineConsumer:
         self.ch = CHClient(cfg["clickhouse"], self.mig_cfg)
 
     def run(self):
-        log.info("Starting Pipeline Consumer...")
+        if self.mig_cfg.get('debug'):
+            log.info("Starting Pipeline Consumer...")
 
         while True:
             try:
@@ -79,7 +80,8 @@ class PipelineConsumer:
                             start_exec = time.time()
                             self.ch.execute(sql)
                             exec_time = time.time() - start_exec
-                            log.info(f"Consumer: DDL executed: {sql[:100]}... ({exec_time:.2f}s)")
+                            if self.mig_cfg.get('debug'):
+                                log.info(f"Consumer: DDL executed: {sql[:100]}... ({exec_time:.2f}s)")
                             processed_ids.append(q['id'])
                             continue
 
@@ -116,8 +118,9 @@ class PipelineConsumer:
                             # Handling for cases where only SQL is provided
                             self.ch.execute(sql)
                         exec_time = time.time() - start_exec
-                        log.info(
-                            f"Consumer: INSERT {len(params) if params else 1} rows into {table} ({exec_time:.2f}s)")
+                        if self.mig_cfg.get('debug'):
+                            log.info(
+                                f"Consumer: INSERT {len(params) if params else 1} rows into {table} ({exec_time:.2f}s)")
 
                         processed_ids.append(q['id'])
 

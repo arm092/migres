@@ -68,7 +68,8 @@ class PipelineTransformer:
                     
                 # Create/Update ClickHouse Table
                 ddl, insert_cols = build_table_ddl(table, cols_meta, pk_cols, self.mig_cfg)
-                log.info(f"Creating/updating ClickHouse table: {table}")
+                if self.mig_cfg.get('debug'):
+                    log.info(f"Creating/updating ClickHouse table: {table}")
                 self.ch.execute(ddl)
                 
                 # Verify table was created
@@ -143,7 +144,8 @@ class PipelineTransformer:
             return True  # No query to process
             
         query_lower = query.lower().strip()
-        log.info(f"DDL: Processing query: {query[:200]}...")
+        if self.mig_cfg.get('debug'):
+            log.info(f"DDL: Processing query: {query[:200]}...")
         
         # Skip transaction control statements
         if query_lower in ("begin", "commit", "rollback", "xa start", "xa end", "xa prepare", "xa commit", "xa rollback"):
@@ -153,7 +155,8 @@ class PipelineTransformer:
         match = DDL_CREATE_TABLE_PATTERN.search(query)
         if match:
             table_name = match.group(1)
-            log.info(f"DDL: Detected CREATE TABLE for {table_name}")
+            if self.mig_cfg.get('debug'):
+                log.info(f"DDL: Detected CREATE TABLE for {table_name}")
             try:
                 # Invalidate cache if exists
                 if table_name in self.table_cache:
@@ -169,10 +172,12 @@ class PipelineTransformer:
                         if attempt > 0:
                             try:
                                 self.mysql_client.close()
+                                time.sleep(0.5)  # Brief pause to allow connection cleanup
                             except Exception:
                                 pass
                         self._ensure_table_schema(table_name)
-                        log.info(f"DDL: Created table {table_name} in ClickHouse")
+                        if self.mig_cfg.get('debug'):
+                            log.info(f"DDL: Created table {table_name} in ClickHouse")
                         return True
                     except (ValueError, RuntimeError) as e:
                         error_msg = str(e)
@@ -201,14 +206,16 @@ class PipelineTransformer:
         match = DDL_DROP_TABLE_PATTERN.search(query)
         if match:
             table_name = match.group(1)
-            log.info(f"DDL: Detected DROP TABLE for {table_name}")
+            if self.mig_cfg.get('debug'):
+                log.info(f"DDL: Detected DROP TABLE for {table_name}")
             try:
                 # Invalidate cache
                 if table_name in self.table_cache:
                     del self.table_cache[table_name]
                 # Drop in ClickHouse
                 self.ch.execute(f"DROP TABLE IF EXISTS `{self.ch.db}`.`{table_name}`")
-                log.info(f"DDL: Dropped table {table_name} in ClickHouse")
+                if self.mig_cfg.get('debug'):
+                    log.info(f"DDL: Dropped table {table_name} in ClickHouse")
                 return True
             except Exception as e:
                 log.error(f"DDL: Failed to drop table {table_name}: {e}")
@@ -218,7 +225,8 @@ class PipelineTransformer:
         match = DDL_ALTER_TABLE_PATTERN.search(query)
         if match:
             table_name = match.group(1)
-            log.info(f"DDL: Detected ALTER TABLE for {table_name}")
+            if self.mig_cfg.get('debug'):
+                log.info(f"DDL: Detected ALTER TABLE for {table_name}")
             try:
                 # Invalidate cache to force schema refresh
                 if table_name in self.table_cache:
@@ -232,11 +240,13 @@ class PipelineTransformer:
                         if attempt > 0:
                             try:
                                 self.mysql_client.close()
+                                time.sleep(0.5)  # Brief pause to allow connection cleanup
                             except Exception:
                                 pass
                         # Re-sync schema - this will add/modify columns as needed
                         self._ensure_table_schema(table_name)
-                        log.info(f"DDL: Synchronized schema for {table_name} after ALTER")
+                        if self.mig_cfg.get('debug'):
+                            log.info(f"DDL: Synchronized schema for {table_name} after ALTER")
                         return True
                     except ValueError as e:
                         if "No columns found" in str(e) and attempt < max_retries - 1:
@@ -261,10 +271,12 @@ class PipelineTransformer:
         match = DDL_TRUNCATE_TABLE_PATTERN.search(query)
         if match:
             table_name = match.group(1)
-            log.info(f"DDL: Detected TRUNCATE TABLE for {table_name}")
+            if self.mig_cfg.get('debug'):
+                log.info(f"DDL: Detected TRUNCATE TABLE for {table_name}")
             try:
                 self.ch.execute(f"TRUNCATE TABLE IF EXISTS `{self.ch.db}`.`{table_name}`")
-                log.info(f"DDL: Truncated table {table_name} in ClickHouse")
+                if self.mig_cfg.get('debug'):
+                    log.info(f"DDL: Truncated table {table_name} in ClickHouse")
                 return True
             except Exception as e:
                 log.error(f"DDL: Failed to truncate table {table_name}: {e}")
@@ -361,7 +373,8 @@ class PipelineTransformer:
             raise
 
     def run(self):
-        log.info("Starting Pipeline Transformer...")
+        if self.mig_cfg.get('debug'):
+            log.info("Starting Pipeline Transformer...")
         
         while True:
             try:
@@ -379,7 +392,11 @@ class PipelineTransformer:
                 
                 for event in raw_events:
                     if event['event_type'] == 'QueryEvent':
-                        ddl_events.append(event)
+                        # Filter out transaction control statements that shouldn't be processed as DDL
+                        query = event['event_data'].get('query', '').lower().strip()
+                        if query not in ("begin", "commit", "rollback", "xa start", "xa end", "xa prepare", "xa commit", "xa rollback"):
+                            ddl_events.append(event)
+                        # Skip transaction control statements - they're already handled by MySQL
                     else:
                         if event.get('table'):
                             data_events.append(event)
@@ -441,7 +458,7 @@ class PipelineTransformer:
                     groups[key]['event_ids'].append(event['id'])
                 
                 # Log grouping details
-                if groups:
+                if groups and self.mig_cfg.get('debug'):
                     group_summary = ", ".join([f"{t}:{et}={len(group['events'])}" for (s, t, et), group in groups.items()])
                     log.info(f"Transformer grouping: {group_summary}")
                 
@@ -486,7 +503,8 @@ class PipelineTransformer:
                         # This handles the case where old DROP events from previous runs
                         # are replayed alongside new CREATE events
                         if table_name in tables_created_in_batch:
-                            log.info(f"DDL: Skipping DROP TABLE for {table_name} (table was recreated in this batch)")
+                            if self.mig_cfg.get('debug'):
+                                log.info(f"DDL: Skipping DROP TABLE for {table_name} (table was recreated in this batch)")
                             ddl_processed += 1
                             continue
                         
@@ -503,9 +521,10 @@ class PipelineTransformer:
                             "is_ddl": True
                         })
                         ddl_processed += 1
-                        log.info(f"DDL: Queued deferred DROP TABLE for {table_name} (will execute after data inserts)")
+                        if self.mig_cfg.get('debug'):
+                            log.info(f"DDL: Queued deferred DROP TABLE for {table_name} (will execute after data inserts)")
                 
-                if ddl_processed > 0:
+                if ddl_processed > 0 and self.mig_cfg.get('debug'):
                     log.info(f"Processed {ddl_processed} DDL event(s)")
                 
                 # 7. Atomic Commit (Insert Queries + Delete Raw Events)

@@ -46,7 +46,9 @@ def run_cdc_pipeline(cfg):
     notify_cdc_startup(config_summary)
     
     last_stats_log = 0
-    stats_interval = 10  # Log stats every 10 seconds
+    last_idle_log = 0
+    stats_interval = 10 if cfg.get("migration", {}).get("debug", False) else 60  # Log stats every 10s in debug, 60s otherwise
+    idle_interval = 60  # Log idle status every 60 seconds when not in debug mode
     
     try:
         while True:
@@ -63,14 +65,30 @@ def run_cdc_pipeline(cfg):
             
             # Periodic stats logging
             now = time.time()
-            if now - last_stats_log >= stats_interval:
-                try:
-                    stats = buffer_monitor.get_queue_stats()
-                    if stats['raw_events'] > 0 or stats['prepared_queries'] > 0:
-                        logging.info(f"[QUEUE STATS] raw_events: {stats['raw_events']}, prepared_queries: {stats['prepared_queries']}")
-                except Exception as e:
-                    logging.warning(f"Failed to get queue stats: {e}")
-                last_stats_log = now
+            debug_mode = cfg.get("migration", {}).get("debug", False)
+            
+            if debug_mode:
+                # In debug mode, log stats frequently
+                if now - last_stats_log >= stats_interval:
+                    try:
+                        stats = buffer_monitor.get_queue_stats()
+                        if stats['raw_events'] > 0 or stats['prepared_queries'] > 0:
+                            logging.info(f"[QUEUE STATS] raw_events: {stats['raw_events']}, prepared_queries: {stats['prepared_queries']}")
+                    except Exception as e:
+                        logging.warning(f"Failed to get queue stats: {e}")
+                    last_stats_log = now
+            else:
+                # In non-debug mode, log idle status once per minute
+                if now - last_idle_log >= idle_interval:
+                    try:
+                        stats = buffer_monitor.get_queue_stats()
+                        if stats['raw_events'] == 0 and stats['prepared_queries'] == 0:
+                            logging.info(f"[IDLE] CDC pipeline running - queues empty (raw_events: 0, prepared_queries: 0)")
+                        else:
+                            logging.info(f"[STATUS] raw_events: {stats['raw_events']}, prepared_queries: {stats['prepared_queries']}")
+                    except Exception as e:
+                        logging.warning(f"Failed to get queue stats: {e}")
+                    last_idle_log = now
             
             time.sleep(1)
     except KeyboardInterrupt:
@@ -136,7 +154,8 @@ def main():
             cdc_cfg = (cfg.get("migration", {}).get("cdc", {}) or {})
             snapshot_before = bool(cdc_cfg.get("snapshot_before", True))
             if snapshot_before:
-                logging.info("CDC: running initial snapshot before starting binlog streaming...")
+                if cfg.get("migration", {}).get("debug", False):
+                    logging.info("CDC: running initial snapshot before starting binlog streaming...")
                 try:
                     run_snapshot(cfg)
                 except (IOError, OSError) as e:
@@ -153,7 +172,8 @@ def main():
                     notify_cdc_error("Snapshot", "N/A",
                                      f"An unexpected error occurred during the initial snapshot before the CDC started: {str(e)}")
                     raise
-                logging.info("CDC: initial snapshot completed, starting binlog streaming...")
+                if cfg.get("migration", {}).get("debug", False):
+                    logging.info("CDC: initial snapshot completed, starting binlog streaming...")
                 notify_cdc_info("Snapshot", "Snapshot finished successfully, starting binlog streaming...")
 
             # Run the new pipeline architecture

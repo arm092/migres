@@ -41,15 +41,18 @@ class PipelineProducer:
         if buf_file and buf_pos:
             self.start_file = buf_file
             self.start_pos = buf_pos
-            log.info(f"Producer starting from Buffer position: {self.start_file}:{self.start_pos}")
+            if self.mig_cfg.get('debug'):
+                log.info(f"Producer starting from Buffer position: {self.start_file}:{self.start_pos}")
         elif state_binlog:
             self.start_file = state_binlog["file"]
             self.start_pos = state_binlog["pos"]
-            log.info(f"Producer starting from State file position: {self.start_file}:{self.start_pos}")
+            if self.mig_cfg.get('debug'):
+                log.info(f"Producer starting from State file position: {self.start_file}:{self.start_pos}")
         else:
             self.start_file = None
             self.start_pos = None
-            log.info("Producer starting from current master position")
+            if self.mig_cfg.get('debug'):
+                log.info("Producer starting from current master position")
 
     def _serialize_event(self, event):
         """Serialize binlog event for storage"""
@@ -118,13 +121,21 @@ class PipelineProducer:
         only_tables = list(included) if included else None
         ignored_tables = list(excluded) if excluded else None
 
+        # Connection settings with timeouts to prevent connection drops
+        connection_settings = {
+            "host": self.mysql_cfg["host"],
+            "port": self.mysql_cfg["port"] or 3306,
+            "user": self.mysql_cfg["user"],
+            "passwd": self.mysql_cfg["password"],
+            "connect_timeout": 60,  # Time to wait for initial connection
+            "read_timeout": 60,  # Time to wait for read operations
+            "write_timeout": 60,  # Time to wait for write operations
+            "autocommit": False,
+            "charset": "utf8mb4",
+        }
+        
         return BinLogStreamReader(
-            connection_settings={
-                "host": self.mysql_cfg["host"],
-                "port": self.mysql_cfg["port"] or 3306,
-                "user": self.mysql_cfg["user"],
-                "passwd": self.mysql_cfg["password"],
-            },
+            connection_settings=connection_settings,
             server_id=self.server_id,
             blocking=False,  # Non-blocking to allow time-based flushing
             resume_stream=True,
@@ -138,7 +149,8 @@ class PipelineProducer:
         )
 
     def run(self):
-        log.info("Starting Pipeline Producer...")
+        if self.mig_cfg.get('debug'):
+            log.info("Starting Pipeline Producer...")
         self.mysql_client.connect()
 
         stream = self._create_stream()
@@ -169,7 +181,8 @@ class PipelineProducer:
                     if batch:
                         try:
                             self.buffer.insert_raw_events(batch)
-                            log.info(f"Producer flushed {len(batch)} events before reconnect")
+                            if self.mig_cfg.get('debug'):
+                                log.info(f"Producer flushed {len(batch)} events before reconnect")
                             batch = []
                         except Exception as flush_err:
                             log.warning(f"Failed to flush batch before reconnect: {flush_err}")
@@ -183,6 +196,9 @@ class PipelineProducer:
                         stream.close()
                     except Exception:
                         pass
+                    
+                    # Brief pause to allow MySQL to release the connection
+                    time.sleep(1)
                     
                     stream = self._create_stream(current_file, current_pos)
                     last_flush_time = time.time()
@@ -204,7 +220,9 @@ class PipelineProducer:
                 # Filter DDL
                 if isinstance(event, QueryEvent):
                     query = (event.query or "").lower().strip()
-                    if query == "begin": continue
+                    # Skip transaction control statements - they're not DDL and don't need processing
+                    if query in ("begin", "commit", "rollback", "xa start", "xa end", "xa prepare", "xa commit", "xa rollback"):
+                        continue
                     
                     # For CREATE TABLE DDL, check if table is in include_tables
                     # QueryEvent might be filtered by BinLogStreamReader's only_tables,
@@ -264,5 +282,8 @@ class PipelineProducer:
             notify_cdc_error("CDC Producer Failure", "N/A", str(e))
             sys.exit(1)
         finally:
-            stream.close()
-            self.mysql_client.close()
+            try:
+                stream.close()
+            except Exception:
+                pass
+            # mysql_client is not used by producer (BinLogStreamReader has its own connection)

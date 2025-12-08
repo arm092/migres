@@ -161,8 +161,8 @@ def run_snapshot(cfg):
     #    Instead, each worker opens its own connection and starts a REPEATABLE READ transaction
     #    on that connection (so each table snapshot is consistent on its connection).
     #    NOTE: snapshots across connections are not a globally atomic snapshot. See caveats below.
-    #    Nevertheless, recording binlog position before snapshot and then starting Transferia
-    #    from that position ensures changes after the recorded pos are streamed by Transferia.
+    #    Nevertheless, recording binlog position before snapshot and then starting CDC
+    #    from that position ensures changes after the recorded pos are streamed by CDC.
     #
     # 3) determine tables (include/exclude logic)
     include = mysql_cfg.get("include_tables") or []

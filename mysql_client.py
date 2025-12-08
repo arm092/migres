@@ -22,6 +22,14 @@ class MySQLClient:
                 self._connection_logged.add(self._config_key)
 
     def connect(self):
+        # Close existing connection if any (avoid connection leaks)
+        if self.cn:
+            try:
+                self.cn.close()
+            except mysql.connector.Error:
+                pass
+            self.cn = None
+        
         # Only log connection once per unique config (across all threads)
         if self._should_log_connection:
             log.info("MySQL connected: %s:%s/%s", self.cfg["host"], self.cfg.get("port", 3306), self.cfg["database"])
@@ -45,6 +53,8 @@ class MySQLClient:
                 self.cn.close()
             except mysql.connector.Error:
                 pass
+            finally:
+                self.cn = None  # Ensure reference is cleared
 
     def get_mysql_version(self):
         """Get MySQL version for compatibility checks"""
