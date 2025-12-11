@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 import re
 from collections import defaultdict
@@ -25,6 +26,7 @@ class PipelineTransformer:
         self.mysql_client = MySQLClient(cfg["mysql"])
         self.ch = CHClient(cfg["clickhouse"], self.mig_cfg)
         self._last_commit_ns = 0
+        self._shutdown_flag = threading.Event()
         
         # Cache for table schema
         # table_name -> (insert_cols, mysql_col_names)
@@ -376,13 +378,15 @@ class PipelineTransformer:
         if self.mig_cfg.get('debug'):
             log.info("Starting Pipeline Transformer...")
         
-        while True:
+        while not self._shutdown_flag.is_set():
             try:
                 # 1. Fetch Batch
                 raw_events = self.buffer.fetch_raw_events_batch(limit=self.mig_cfg.get('cdc', {}).get('checkpoint_interval_rows', 5000))
                 
                 if not raw_events:
-                    time.sleep(5)
+                    # Check shutdown flag during sleep
+                    if self._shutdown_flag.wait(timeout=5):
+                        break
                     continue
                 
                 # 2. Separate events: DDL and data events (preserve DDL order)
@@ -539,5 +543,11 @@ class PipelineTransformer:
                 
             except Exception as e:
                 log.exception(f"Pipeline Transformer failed: {str(e)}")
+                # On error, check if shutdown was requested
+                if self._shutdown_flag.is_set():
+                    log.info("Transformer shutting down due to shutdown flag")
+                    break
                 time.sleep(1) # Retry loop
+        
+        log.info("Pipeline Transformer shutdown complete")
 

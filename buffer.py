@@ -248,28 +248,6 @@ class BufferDB:
         cursor.execute(f"DELETE FROM prepared_queries WHERE id IN ({placeholders})", query_ids)
         conn.commit()
 
-    def move_to_failed(self, query_id: int, reason: str):
-        """Move a prepared query to failed_queries table"""
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        try:
-            # 1. Get query data
-            cursor.execute("SELECT sql_query, params, schema_name, table_name FROM prepared_queries WHERE id = ?", (query_id,))
-            row = cursor.fetchone()
-            if row:
-                # 2. Insert into failed_queries
-                cursor.execute("""
-                    INSERT INTO failed_queries (id, sql_query, params, schema_name, table_name, error_reason)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (query_id, row[0], row[1], row[2], row[3], reason))
-                
-                # 3. Delete from prepared_queries
-                cursor.execute("DELETE FROM prepared_queries WHERE id = ?", (query_id,))
-                
-            conn.commit()
-        except Exception as e:
-            log.error(f"Failed to move query {query_id} to failed_queries: {e}")
-            conn.rollback()
 
     def get_queue_stats(self) -> Dict:
         """Get stats for monitoring"""

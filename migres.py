@@ -54,13 +54,31 @@ def run_cdc_pipeline(cfg):
         while True:
             # Monitor threads
             if not producer_thread.is_alive():
-                logging.critical("Producer thread died! Exiting.")
+                logging.critical("Producer thread died! Shutting down pipeline.")
+                notify_cdc_shutdown("Producer thread died")
                 sys.exit(1)
             if not transformer_thread.is_alive():
-                logging.critical("Transformer thread died! Exiting.")
+                logging.critical("Transformer thread died! Shutting down pipeline.")
+                notify_cdc_shutdown("Transformer thread died")
                 sys.exit(1)
             if not consumer_thread.is_alive():
-                logging.critical("Consumer thread died! Exiting.")
+                logging.critical("Consumer thread died! Shutting down pipeline gracefully.")
+                # Signal shutdown to producer and transformer
+                producer._shutdown_flag.set()
+                transformer._shutdown_flag.set()
+                
+                # Wait for threads to finish current operations (with timeout)
+                logging.info("Waiting for producer and transformer to finish current operations...")
+                producer_thread.join(timeout=30)
+                transformer_thread.join(timeout=30)
+                
+                if producer_thread.is_alive():
+                    logging.warning("Producer thread did not finish within timeout")
+                if transformer_thread.is_alive():
+                    logging.warning("Transformer thread did not finish within timeout")
+                
+                # Consumer failure means queries remain in prepared_queries for retry
+                notify_cdc_shutdown("Consumer thread died - queries remain in prepared_queries for retry")
                 sys.exit(1)
             
             # Periodic stats logging

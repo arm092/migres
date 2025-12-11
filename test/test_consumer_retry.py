@@ -2,9 +2,9 @@
 """
 Consumer Retry Test - Tests consumer retry logic for failed queries.
 Verifies:
-1. Consumer retries failed queries
-2. Failed queries are moved to failed_queries table
-3. System continues processing other queries
+1. Consumer crashes on failed queries (fail-fast approach)
+2. Failed queries remain in prepared_queries for retry after restart
+3. System shuts down gracefully when consumer crashes
 """
 
 import time
@@ -19,17 +19,17 @@ from buffer import BufferDB
 from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse, get_batch_delay_seconds, optimize_clickhouse_table
 
 
-def get_failed_queries():
-    """Get failed queries from buffer"""
+def get_prepared_queries_count():
+    """Get count of prepared queries in buffer"""
     try:
         conn = sqlite3.connect("data/buffer.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT id, sql_query, error_reason FROM failed_queries ORDER BY failed_at DESC LIMIT 10")
-        rows = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM prepared_queries")
+        count = cursor.fetchone()[0]
         conn.close()
-        return rows
+        return count
     except Exception:
-        return []
+        return 0
 
 
 @pytest.mark.integration
@@ -85,9 +85,9 @@ def test_consumer_handles_failures(db_connections, migres_process):
     from conftest import get_clickhouse_count_reliable
     ch_count = get_clickhouse_count_reliable(ch, table, timeout=60)
     
-    # Check failed queries (should be empty for valid data)
-    failed_queries = get_failed_queries()
-    print(f"📊 Failed queries: {len(failed_queries)}")
+    # Check prepared queries (should be empty after successful processing)
+    prepared_count = get_prepared_queries_count()
+    print(f"📊 Prepared queries remaining: {prepared_count}")
     
     assert ch_count == 200, f"Expected 200 rows, got {ch_count}"
     

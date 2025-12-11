@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Partial Failures Test - Tests behavior when some queries in a batch succeed and others fail.
+Partial Failures Test - Tests behavior when queries fail.
 Verifies:
-1. Successful queries are committed even if others fail
-2. Failed queries are moved to failed_queries table
-3. No data loss for successful operations
+1. Consumer crashes on query failure (fail-fast approach)
+2. Failed queries remain in prepared_queries for retry after restart
+3. System shuts down gracefully
 """
 
 import time
@@ -19,12 +19,12 @@ from buffer import BufferDB
 from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse, get_batch_delay_seconds, optimize_clickhouse_table
 
 
-def get_failed_queries_count():
-    """Get count of failed queries in buffer"""
+def get_prepared_queries_count():
+    """Get count of prepared queries in buffer"""
     try:
         conn = sqlite3.connect("data/buffer.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM failed_queries")
+        cursor.execute("SELECT COUNT(*) FROM prepared_queries")
         count = cursor.fetchone()[0]
         conn.close()
         return count
@@ -121,8 +121,8 @@ def test_schema_mismatch_partial_failure(db_connections, migres_process):
         # If timeout, check buffer status to diagnose
         stats_after = buf.get_queue_stats()
         print(f"⚠️ CDC sync timeout. Buffer status: raw={stats_after['raw_events']}, prepared={stats_after['prepared_queries']}")
-        failed_count_before = get_failed_queries_count()
-        print(f"⚠️ Failed queries count: {failed_count_before}")
+        prepared_count_before = get_prepared_queries_count()
+        print(f"⚠️ Prepared queries count: {prepared_count_before}")
         # Even if sync times out, continue if queues are mostly empty (allow some tolerance)
         if stats_after['raw_events'] <= 5 and stats_after['prepared_queries'] <= 5:
             print("⚠️ Queues are mostly empty, continuing despite timeout...")
@@ -134,14 +134,14 @@ def test_schema_mismatch_partial_failure(db_connections, migres_process):
     # Check final count
     ch_count_after = get_clickhouse_count_reliable(ch, table, timeout=60)
     
-    # Check failed queries
-    failed_count = get_failed_queries_count()
-    print(f"📊 Failed queries in buffer: {failed_count}")
+    # Check prepared queries
+    prepared_count = get_prepared_queries_count()
+    print(f"📊 Prepared queries in buffer: {prepared_count}")
     
     # At least the initial 100 should be there
     assert ch_count_after >= 100, f"Expected at least 100 rows, got {ch_count_after}"
     
-    print(f"✅ Partial failure test: {ch_count_after} rows replicated, {failed_count} failed queries")
+    print(f"✅ Partial failure test: {ch_count_after} rows replicated, {prepared_count} queries in buffer")
     
     # Cleanup
     with mysql.cn.cursor() as cur:

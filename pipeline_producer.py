@@ -1,5 +1,6 @@
 import logging
 import sys
+import threading
 import time
 from datetime import datetime
 from mysql_client import MySQLClient
@@ -22,6 +23,7 @@ class PipelineProducer:
         self.buffer = BufferDB()
         self.state = StateJson(cfg.get("state_file"))
         self.mysql_client = MySQLClient(self.mysql_cfg)
+        self._shutdown_flag = threading.Event()
         
         # Use process ID to make server_id unique per process instance
         # This prevents conflicts when multiple migres instances run or restart quickly
@@ -167,7 +169,7 @@ class PipelineProducer:
         max_consecutive_errors = 10
         
         try:
-            while True:
+            while not self._shutdown_flag.is_set():
                 try:
                     event = stream.fetchone()
                     consecutive_errors = 0  # Reset on success
@@ -282,8 +284,17 @@ class PipelineProducer:
             notify_cdc_error("CDC Producer Failure", "N/A", str(e))
             sys.exit(1)
         finally:
+            # Flush any pending batch before shutdown
+            if batch:
+                try:
+                    log.info(f"Producer flushing {len(batch)} pending events before shutdown")
+                    self.buffer.insert_raw_events(batch)
+                    log.info("Producer flushed pending events successfully")
+                except Exception as flush_err:
+                    log.error(f"Failed to flush pending batch during shutdown: {flush_err}")
             try:
                 stream.close()
             except Exception:
                 pass
             # mysql_client is not used by producer (BinLogStreamReader has its own connection)
+            log.info("Pipeline Producer shutdown complete")

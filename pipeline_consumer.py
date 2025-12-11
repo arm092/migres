@@ -16,16 +16,11 @@ ISO_DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 def _convert_for_clickhouse(v):
     """
     Convert Python types to ClickHouse-compatible types.
-    ClickHouse driver expects datetime/date objects to be strings.
+    ClickHouse driver handles datetime/date objects natively for DateTime64/Date columns.
+    Only convert bytes to strings.
     """
     if v is None:
         return None
-    elif isinstance(v, datetime):
-        # Convert datetime to string format that ClickHouse can parse
-        return v.strftime('%Y-%m-%d %H:%M:%S')
-    elif isinstance(v, date):
-        # Convert date to string format
-        return v.strftime('%Y-%m-%d')
     elif isinstance(v, bytes):
         # Convert bytes to string
         try:
@@ -33,6 +28,7 @@ def _convert_for_clickhouse(v):
         except UnicodeDecodeError:
             return v.decode('latin-1')
     else:
+        # Pass through datetime, date, and other types - ClickHouse driver handles them
         return v
 
 
@@ -69,7 +65,7 @@ def _deserialize_row(row):
 
 
 def _convert_row_for_clickhouse(row):
-    """Convert datetime/date objects in a row to strings for ClickHouse"""
+    """Convert bytes objects in a row to strings for ClickHouse compatibility"""
     return [_convert_for_clickhouse(v) for v in row]
 
 
@@ -130,11 +126,23 @@ class PipelineConsumer:
                                 waited += 1
 
                             if not table_exists:
-                                msg = f"Table {table} does not exist after {max_wait}s wait. Skipping query."
-                                log.error(msg)
-                                notify_cdc_error('Consumer Error', table, msg, {"Query ID": q['id'], "SQL": q['sql']})
-                                self.buffer.move_to_failed(q['id'], msg)
-                                continue  # Skip execution, don't add to processed_ids (handled by move_to_failed)
+                                error_msg = f"Table {table} does not exist after {max_wait}s wait"
+                                log.error(error_msg)
+                                # Send notification with full query details
+                                notify_cdc_error(
+                                    "Consumer Error",
+                                    f"{q.get('schema')}.{q.get('table')}",
+                                    error_msg,
+                                    {
+                                        "Query ID": q['id'],
+                                        "SQL": q['sql'],
+                                        "Params": str(q.get('params', []))[:500] if q.get('params') else None,
+                                        "Schema": q.get('schema'),
+                                        "Table": q.get('table')
+                                    }
+                                )
+                                # Query remains in prepared_queries - crash consumer to stop processing
+                                raise RuntimeError(error_msg)
 
                         # params is a list of rows for bulk insert
                         # Deserialize datetime strings back to datetime objects, then convert to ClickHouse-compatible format
@@ -156,33 +164,41 @@ class PipelineConsumer:
 
                     except Exception as e:
                         log.exception(f"Consumer failed to execute query id={q['id']}")
-                        # Move failed query to failed_queries table so it doesn't block CDC sync
-                        # This allows other queries to continue processing
+                        # Send notification with full query details before crashing
                         error_msg = f"Execution failed: {str(e)}"
-                        self.buffer.move_to_failed(q['id'], error_msg)
-                        log.warning(f"Moved query id={q['id']} to failed_queries: {error_msg}")
                         notify_cdc_error(
                             "Consumer Error",
                             f"{q.get('schema')}.{q.get('table')}",
                             error_msg,
-                            {"Query ID": q['id'], "SQL": q['sql']}
+                            {
+                                "Query ID": q['id'],
+                                "SQL": q['sql'],
+                                "Params": str(q.get('params', []))[:500] if q.get('params') else None,
+                                "Schema": q.get('schema'),
+                                "Table": q.get('table'),
+                                "Error Type": type(e).__name__
+                            }
                         )
-                        # Continue processing other queries in the batch instead of raising
-                        continue
+                        # Query remains in prepared_queries for retry after restart
+                        # Crash consumer to stop processing - main loop will detect and shut down gracefully
+                        raise
 
-                        # 3. Commit (Delete from Buffer)
+                # 3. Commit (Delete from Buffer) - only delete successfully processed queries
                 if processed_ids:
                     self.buffer.delete_prepared_queries(processed_ids)
                     if self.mig_cfg.get('debug'):
                         log.info(f"Consumer executed {len(processed_ids)} queries")
 
             except Exception as e:
-                log.error(f"Pipeline Consumer loop error: {str(e)}")
+                # Outer exception handler - any unhandled error crashes the consumer
+                log.critical(f"Pipeline Consumer fatal error: {str(e)}")
                 notify_cdc_error(
-                    "Consumer Error",
+                    "Consumer Fatal Error",
                     "N/A",
-                    str(e)
+                    f"Consumer crashed: {str(e)}",
+                    {"Error Type": type(e).__name__}
                 )
-                time.sleep(1)
+                # Re-raise to crash the thread - main loop will detect and shut down
+                raise
 
             time.sleep(self.mig_cfg.get("cdc", {}).get('batch_delay_seconds', 15))

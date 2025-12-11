@@ -2,9 +2,9 @@
 """
 Schema Mismatch Test - Tests schema changes causing data type mismatches.
 Verifies:
-1. System handles schema mismatches gracefully
-2. Failed operations are logged to failed_queries
-3. Valid operations continue to work
+1. Consumer crashes on schema mismatch (fail-fast approach)
+2. Failed queries remain in prepared_queries for retry after restart
+3. System shuts down gracefully
 """
 
 import time
@@ -19,20 +19,17 @@ from buffer import BufferDB
 from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse, get_batch_delay_seconds, optimize_clickhouse_table
 
 
-def get_failed_queries_for_table(table_name):
-    """Get failed queries for a specific table"""
+def get_prepared_queries_count():
+    """Get count of prepared queries in buffer"""
     try:
         conn = sqlite3.connect("data/buffer.db")
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, error_reason FROM failed_queries WHERE table_name = ? ORDER BY failed_at DESC LIMIT 10",
-            (table_name,)
-        )
-        rows = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM prepared_queries")
+        count = cursor.fetchone()[0]
         conn.close()
-        return rows
+        return count
     except Exception:
-        return []
+        return 0
 
 
 @pytest.mark.integration
@@ -116,9 +113,9 @@ def test_type_mismatch_handling(db_connections, migres_process):
     
     ch_count_final = get_clickhouse_count_reliable(ch, table, timeout=60)
     
-    # Check failed queries
-    failed_queries = get_failed_queries_for_table(table)
-    print(f"📊 Failed queries for {table}: {len(failed_queries)}")
+    # Check prepared queries
+    prepared_count = get_prepared_queries_count()
+    print(f"📊 Prepared queries in buffer: {prepared_count}")
     
     assert mysql_count == 150, f"Expected MySQL count=150, got {mysql_count}"
     assert ch_count_final >= 100, f"Expected at least 100 rows in ClickHouse, got {ch_count_final}"
