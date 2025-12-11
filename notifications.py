@@ -302,10 +302,14 @@ class TeamsNotification:
             notification_type="cdc_info"
         )
     
-    def send_cdc_startup(self, config_summary: Dict) -> bool:
+    def send_cdc_startup(self, config_summary: Dict, mode: str = "cdc") -> bool:
         """Send CDC startup notification"""
-        title = self._format_title("🚀 Migres Started")
-        message = "Migres process (CDC/Snapshot) has started successfully"
+        if mode.lower() == "snapshot":
+            title = self._format_title("📸 Snapshot Started")
+            message = "Snapshot migration process has started successfully"
+        else:
+            title = self._format_title("🚀 CDC Started")
+            message = "CDC (Change Data Capture) process has started successfully"
 
         details = {
             "Startup Time": datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
@@ -431,11 +435,11 @@ def notify_cdc_info(info_type: str, message: str, details: Optional[Dict] = None
     return False
 
 
-def notify_cdc_startup(config_summary: Dict) -> bool:
+def notify_cdc_startup(config_summary: Dict, mode: str = "cdc") -> bool:
     """Send CDC startup notification"""
     handler = get_notification_handler()
     if handler:
-        return handler.send_cdc_startup(config_summary)
+        return handler.send_cdc_startup(config_summary, mode)
     return False
 
 

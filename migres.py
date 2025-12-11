@@ -43,7 +43,7 @@ def run_cdc_pipeline(cfg):
         "Batch Delay": f"{cfg['migration']['cdc']['batch_delay_seconds']}s",
         "Mode": "CDC",
     }
-    notify_cdc_startup(config_summary)
+    notify_cdc_startup(config_summary, "cdc")
     
     last_stats_log = 0
     last_idle_log = 0
@@ -129,10 +129,10 @@ def main():
         "Batch Delay": f"{cfg['migration']['cdc']['batch_delay_seconds']}s",
         "Mode": mode
     }
-    notify_cdc_startup(config_summary)
     if mode == "snapshot":
         logging.info("Starting migres (snapshot) mode...")
         try:
+            notify_cdc_startup(config_summary, 'snapshot')
             run_snapshot(cfg)
         except (IOError, OSError) as e:
             logging.exception("Snapshot failed due to a file or system error")
@@ -157,6 +157,7 @@ def main():
                 if cfg.get("migration", {}).get("debug", False):
                     logging.info("CDC: running initial snapshot before starting binlog streaming...")
                 try:
+                    notify_cdc_startup(config_summary, 'snapshot')
                     run_snapshot(cfg)
                 except (IOError, OSError) as e:
                     logging.exception("The initial snapshot failed before the CDC started due to a file or system error:")
