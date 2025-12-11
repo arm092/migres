@@ -1,7 +1,7 @@
 import logging
 import time
 import re
-from datetime import datetime
+from datetime import datetime, date
 from clickhouse_client import CHClient
 from buffer import BufferDB
 from notifications import notify_cdc_error
@@ -11,6 +11,29 @@ log = logging.getLogger(__name__)
 # Regex patterns for datetime detection
 ISO_DATETIME_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}')
 ISO_DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _convert_for_clickhouse(v):
+    """
+    Convert Python types to ClickHouse-compatible types.
+    ClickHouse driver expects datetime/date objects to be strings.
+    """
+    if v is None:
+        return None
+    elif isinstance(v, datetime):
+        # Convert datetime to string format that ClickHouse can parse
+        return v.strftime('%Y-%m-%d %H:%M:%S')
+    elif isinstance(v, date):
+        # Convert date to string format
+        return v.strftime('%Y-%m-%d')
+    elif isinstance(v, bytes):
+        # Convert bytes to string
+        try:
+            return v.decode('utf-8')
+        except UnicodeDecodeError:
+            return v.decode('latin-1')
+    else:
+        return v
 
 
 def _deserialize_value(v):
@@ -43,6 +66,11 @@ def _deserialize_value(v):
 def _deserialize_row(row):
     """Deserialize all values in a row (list)"""
     return [_deserialize_value(v) for v in row]
+
+
+def _convert_row_for_clickhouse(row):
+    """Convert datetime/date objects in a row to strings for ClickHouse"""
+    return [_convert_for_clickhouse(v) for v in row]
 
 
 class PipelineConsumer:
@@ -109,11 +137,13 @@ class PipelineConsumer:
                                 continue  # Skip execution, don't add to processed_ids (handled by move_to_failed)
 
                         # params is a list of rows for bulk insert
-                        # Deserialize datetime strings back to datetime objects
+                        # Deserialize datetime strings back to datetime objects, then convert to ClickHouse-compatible format
                         start_exec = time.time()
                         if params:
                             deserialized_params = [_deserialize_row(row) for row in params]
-                            self.ch.client.execute(sql, deserialized_params)
+                            # Convert datetime/date objects to strings for ClickHouse compatibility
+                            clickhouse_params = [_convert_row_for_clickhouse(row) for row in deserialized_params]
+                            self.ch.client.execute(sql, clickhouse_params)
                         else:
                             # Handling for cases where only SQL is provided
                             self.ch.execute(sql)
