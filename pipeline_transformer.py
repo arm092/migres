@@ -146,12 +146,13 @@ class PipelineTransformer:
             return True  # No query to process
             
         query_lower = query.lower().strip()
+        
+        # Skip transaction control statements (check before logging)
+        if query_lower in ("begin", "commit", "rollback", "xa start", "xa end", "xa prepare", "xa commit", "xa rollback") or query_lower.startswith("savepoint"):
+            return True
+        
         if self.mig_cfg.get('debug'):
             log.info(f"DDL: Processing query: {query[:200]}...")
-        
-        # Skip transaction control statements
-        if query_lower in ("begin", "commit", "rollback", "xa start", "xa end", "xa prepare", "xa commit", "xa rollback"):
-            return True
             
         # CREATE TABLE
         match = DDL_CREATE_TABLE_PATTERN.search(query)

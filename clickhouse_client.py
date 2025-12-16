@@ -30,6 +30,11 @@ class CHClient:
                 if timezone_key not in self._initialization_logged:
                     log.info("ClickHouse timezone set to: %s", timezone)
                     self._initialization_logged.add(timezone_key)
+        
+        # Configure timeout settings to prevent hanging queries
+        # These are critical for detecting slow ClickHouse performance
+        self.connect_timeout = 10  # Connection timeout in seconds
+        self.send_receive_timeout = 300  # Query timeout in seconds (5 minutes)
 
         # Step 1: connect without database to ensure DB exists
         # Only do this once per config (use a lock to prevent race condition)
@@ -44,7 +49,9 @@ class CHClient:
             tmp_client = Client(
                 host=cfg["host"], port=cfg.get("port", 9000),
                 user=cfg.get("user", "default"), password=cfg.get("password", ""),
-                settings=settings
+                settings=settings,
+                connect_timeout=self.connect_timeout,
+                send_receive_timeout=self.send_receive_timeout
             )
             tmp_client.execute(f"CREATE DATABASE IF NOT EXISTS `{self.db}`")
             tmp_client.disconnect()
@@ -54,7 +61,9 @@ class CHClient:
             host=cfg["host"], port=cfg.get("port", 9000),
             user=cfg.get("user", "default"), password=cfg.get("password", ""),
             database=self.db,
-            settings=settings
+            settings=settings,
+            connect_timeout=self.connect_timeout,
+            send_receive_timeout=self.send_receive_timeout
         )
         
         # Only log initialization once per config
