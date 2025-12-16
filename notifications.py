@@ -5,9 +5,12 @@ Sends notifications to MS Teams channels for errors, warnings, and important eve
 
 import json
 import logging
+import sys
+import traceback
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+
 import requests
 
 log = logging.getLogger(__name__)
@@ -19,6 +22,67 @@ class NotificationLevel(Enum):
     WARNING = "warning"
     ERROR = "error"
     CRITICAL = "critical"
+
+
+def _extract_exception_info(exc: Optional[Exception] = None, tb=None) -> Dict[str, str]:
+    """
+    Extract exception location information (filename, line number, function name)
+    
+    Args:
+        exc: Exception object (optional)
+        tb: Traceback object (optional, if None will use current exception)
+        
+    Returns:
+        Dictionary with exception location details
+    """
+    location_info = {
+        "Exception Location": "Unknown",
+        "File": "Unknown",
+        "Line": "Unknown",
+        "Function": "Unknown"
+    }
+    
+    try:
+        if tb is None:
+            # Get current exception traceback
+            exc_type, exc_value, exc_tb = sys.exc_info()
+            if exc_tb is not None:
+                tb = exc_tb
+            elif exc is not None:
+                # Try to get traceback from exception
+                tb = exc.__traceback__
+        
+        if tb is not None:
+            # Get the last frame in the traceback (where exception was raised)
+            frame = tb
+            while frame.tb_next is not None:
+                frame = frame.tb_next
+            
+            # Get frame info
+            frame_info = frame.tb_frame
+            filename = frame_info.f_code.co_filename
+            line_no = frame.tb_lineno
+            function_name = frame_info.f_code.co_name
+            
+            # Extract just the filename (not full path)
+            import os
+            filename_short = os.path.basename(filename)
+            
+            location_info.update({
+                "Exception Location": f"{filename_short}:{line_no} in {function_name}",
+                "File": filename_short,
+                "Line": str(line_no),
+                "Function": function_name
+            })
+            
+            # Also include full path in a separate field (may be truncated)
+            location_info["Full Path"] = filename if len(filename) < 200 else filename[:200] + "..."
+            
+    except Exception as e:
+        log.debug(f"Failed to extract exception info: {e}")
+        # Return default values
+    
+    return location_info
 
 
 def _get_environment_color(environment: str) -> str:
@@ -237,8 +301,17 @@ class TeamsNotification:
             return False
     
     def send_cdc_error(self, error_type: str, table: str, error_message: str, 
-                      operation_details: Optional[Dict] = None) -> bool:
-        """Send CDC error notification"""
+                      operation_details: Optional[Dict] = None, exc: Optional[Exception] = None) -> bool:
+        """
+        Send CDC error notification
+        
+        Args:
+            error_type: Type of error
+            table: Table name
+            error_message: Error message
+            operation_details: Additional operation details
+            exc: Exception object (optional, used to extract location info)
+        """
         title = self._format_title(f"🚨 CDC Error: {error_type}")
         message = f"**Table:** {table}\n**Error:** {error_message}"
         
@@ -247,6 +320,19 @@ class TeamsNotification:
             "Table": table,
             "Error Message": error_message
         }
+        
+        # Add exception location information
+        if exc is not None:
+            location_info = _extract_exception_info(exc)
+            details.update(location_info)
+        else:
+            # Try to get current exception info if available
+            try:
+                location_info = _extract_exception_info()
+                if location_info.get("Exception Location") != "Unknown":
+                    details.update(location_info)
+            except Exception:
+                pass
         
         if operation_details:
             details.update(operation_details)
@@ -410,11 +496,20 @@ def get_notification_handler() -> Optional[TeamsNotification]:
 
 # Convenience functions for easy use throughout the codebase
 def notify_cdc_error(error_type: str, table: str, error_message: str, 
-                    operation_details: Optional[Dict] = None) -> bool:
-    """Send CDC error notification"""
+                    operation_details: Optional[Dict] = None, exc: Optional[Exception] = None) -> bool:
+    """
+    Send CDC error notification
+    
+    Args:
+        error_type: Type of error
+        table: Table name
+        error_message: Error message
+        operation_details: Additional operation details
+        exc: Exception object (optional, used to extract location info)
+    """
     handler = get_notification_handler()
     if handler:
-        return handler.send_cdc_error(error_type, table, error_message, operation_details)
+        return handler.send_cdc_error(error_type, table, error_message, operation_details, exc)
     return False
 
 

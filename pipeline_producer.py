@@ -281,7 +281,7 @@ class PipelineProducer:
 
         except Exception as e:
             log.exception("Pipeline Producer failed")
-            notify_cdc_error("CDC Producer Failure", "N/A", str(e))
+            notify_cdc_error("CDC Producer Failure", "N/A", str(e), exc=e)
             sys.exit(1)
         finally:
             # Flush any pending batch before shutdown

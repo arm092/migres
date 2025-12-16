@@ -179,17 +179,17 @@ def main():
                     run_snapshot(cfg)
                 except (IOError, OSError) as e:
                     logging.exception("The initial snapshot failed before the CDC started due to a file or system error:")
-                    notify_cdc_error("Snapshot", "N/A", f"The initial snapshot failed before the CDC started due to a file or system error: {str(e)}")
+                    notify_cdc_error("Snapshot", "N/A", f"The initial snapshot failed before the CDC started due to a file or system error: {str(e)}", exc=e)
                     raise
                 except (ValueError, KeyError) as e:
                     logging.exception("The initial snapshot failed before the CDC started due to a configuration or data error")
                     notify_cdc_error("Snapshot", "N/A",
-                                     f"The initial snapshot failed before the CDC started due to a configuration or data error: {str(e)}")
+                                     f"The initial snapshot failed before the CDC started due to a configuration or data error: {str(e)}", exc=e)
                     raise
                 except Exception as e:
                     logging.exception("An unexpected error occurred during the initial snapshot before the CDC started")
                     notify_cdc_error("Snapshot", "N/A",
-                                     f"An unexpected error occurred during the initial snapshot before the CDC started: {str(e)}")
+                                     f"An unexpected error occurred during the initial snapshot before the CDC started: {str(e)}", exc=e)
                     raise
                 if cfg.get("migration", {}).get("debug", False):
                     logging.info("CDC: initial snapshot completed, starting binlog streaming...")

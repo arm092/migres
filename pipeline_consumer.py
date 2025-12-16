@@ -175,7 +175,8 @@ class PipelineConsumer:
                                 "Schema": q.get('schema'),
                                 "Table": q.get('table'),
                                 "Error Type": type(e).__name__
-                            }
+                            },
+                            exc=e
                         )
                         # Query remains in prepared_queries for retry after restart
                         # Crash consumer to stop processing - main loop will detect and shut down gracefully
@@ -194,7 +195,8 @@ class PipelineConsumer:
                     "Consumer Fatal Error",
                     "N/A",
                     f"Consumer crashed: {str(e)}",
-                    {"Error Type": type(e).__name__}
+                    {"Error Type": type(e).__name__},
+                    exc=e
                 )
                 # Re-raise to crash the thread - main loop will detect and shut down
                 raise
