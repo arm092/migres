@@ -23,6 +23,8 @@ def load_config(path):
         cfg["migration"]["cdc"] = {}
     cfg["migration"]["cdc"].setdefault("batch_delay_seconds", 0)
     cfg["migration"]["cdc"].setdefault("prepared_queries_batch_limit", 100)
+    cfg["migration"]["cdc"].setdefault("checkpoint_interval_rows", 5000)
+    cfg["migration"]["cdc"].setdefault("prepared_queries_merge_rows_limit", 0)
     # include_tables empty => all tables
     if cfg["mysql"].get("include_tables") is None:
         cfg["mysql"]["include_tables"] = []

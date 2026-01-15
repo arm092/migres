@@ -381,8 +381,29 @@ class PipelineTransformer:
         
         while not self._shutdown_flag.is_set():
             try:
-                # 1. Fetch Batch
-                raw_events = self.buffer.fetch_raw_events_batch(limit=self.mig_cfg.get('cdc', {}).get('checkpoint_interval_rows', 5000))
+                # 1. Wait for enough raw events (unless disabled)
+                checkpoint_rows = int(self.mig_cfg.get('cdc', {}).get('checkpoint_interval_rows', 5000))
+                fetch_limit = checkpoint_rows if checkpoint_rows > 0 else 5000
+
+                if checkpoint_rows > 0:
+                    while not self._shutdown_flag.is_set():
+                        stats = self.buffer.get_queue_stats()
+                        raw_count = stats.get("raw_events", 0)
+                        if raw_count >= checkpoint_rows:
+                            break
+                        wait_seconds = self.mig_cfg.get('cdc', {}).get('batch_delay_seconds', 5)
+                        if wait_seconds <= 0:
+                            wait_seconds = 0.5
+                        if self.mig_cfg.get('debug'):
+                            log.info(f"Transformer waiting for raw_events to reach {checkpoint_rows} (current={raw_count})")
+                        if self._shutdown_flag.wait(timeout=wait_seconds):
+                            break
+
+                if self._shutdown_flag.is_set():
+                    break
+
+                # 2. Fetch Batch
+                raw_events = self.buffer.fetch_raw_events_batch(limit=fetch_limit)
                 
                 if not raw_events:
                     # Check shutdown flag during sleep
@@ -390,7 +411,7 @@ class PipelineTransformer:
                         break
                     continue
                 
-                # 2. Separate events: DDL and data events (preserve DDL order)
+                # 3. Separate events: DDL and data events (preserve DDL order)
                 ddl_events = []  # Keep ALL DDL in original order
                 data_events = []
                 tables_with_data = set()  # Track tables that have data in this batch
@@ -407,7 +428,7 @@ class PipelineTransformer:
                             data_events.append(event)
                             tables_with_data.add(event.get('table'))
                 
-                # 3. Process DDL events in original order
+                # 4. Process DDL events in original order
                 # But defer DROP for tables that have data in this batch
                 ddl_processed = 0
                 deferred_drops = []
@@ -437,7 +458,7 @@ class PipelineTransformer:
                         log.error(f"DDL handling failed: {str(e)}")
                         raise
                 
-                # 4. Process data events (INSERT, UPDATE, DELETE)
+                # 5. Process data events (INSERT, UPDATE, DELETE)
                 groups = defaultdict(lambda: {'events': [], 'event_ids': []})  # Track both events and their IDs
                 skipped_no_table = 0
                 skipped_not_included = 0
@@ -472,7 +493,7 @@ class PipelineTransformer:
                 if skipped_not_included > 0:
                     log.debug(f"Skipped {skipped_not_included} events for tables not in include_tables")
                 
-                # 5. Generate prepared queries for data events
+                # 6. Generate prepared queries for data events
                 prepared_queries = []
                 total_rows = 0
                 processed_event_ids_for_queries = []  # Track which events successfully generated queries
@@ -495,7 +516,7 @@ class PipelineTransformer:
                             log.error(f"Error generating query for {table} ({event_type}): {e}, {len(group_event_ids)} events will be retried")
                             # Don't add to processed_event_ids_for_queries, so events stay for retry
                 
-                # 6. Queue deferred DROP DDL events as prepared queries
+                # 7. Queue deferred DROP DDL events as prepared queries
                 # This ensures they execute AFTER the data inserts in the consumer
                 # BUT: Skip if the table was recreated (CREATE) in this same batch
                 for event in deferred_drops:
@@ -532,7 +553,7 @@ class PipelineTransformer:
                 if ddl_processed > 0 and self.mig_cfg.get('debug'):
                     log.info(f"Processed {ddl_processed} DDL event(s)")
                 
-                # 7. Atomic Commit (Insert Queries + Delete Raw Events)
+                # 8. Atomic Commit (Insert Queries + Delete Raw Events)
                 # Only commit events that successfully generated queries, plus DDL events, plus skipped events
                 ddl_event_ids = [e['id'] for e in ddl_events]
                 events_to_commit = processed_event_ids_for_queries + ddl_event_ids + skipped_event_ids

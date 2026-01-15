@@ -30,8 +30,9 @@ migration:
   clickhouse_timezone: "Asia/Yerevan"  # Set to desired ClickHouse timezone
   cdc:
     heartbeat_seconds: 5
-    checkpoint_interval_rows: 1000
+    checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100
+    prepared_queries_merge_rows_limit: 5000  # Merge consecutive queries (0 = disable)
     batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
     snapshot_before: true  # Run snapshot before CDC
     server_id: 4379  # Unique ID for binlog replication

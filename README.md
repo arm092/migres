@@ -189,8 +189,9 @@ migration:
   cdc:
     snapshot_before: true  # Run snapshot before CDC
     heartbeat_seconds: 5
-    checkpoint_interval_rows: 1000
+    checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100 # Consumer batch size for execution
+    prepared_queries_merge_rows_limit: 0 # Merge consecutive queries (0 = disable)
     batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
     server_id: 4379  # Unique ID for binlog replication
 
@@ -440,12 +441,13 @@ docker compose up
 
 - **Batch size**: Increase `batch_rows` for faster snapshot (default: 5000)
 - **Workers**: Adjust `workers` based on CPU cores (default: 4)
-- **Checkpoint frequency**: Reduce `checkpoint_interval_rows` for more frequent saves
+- **Checkpoint batching**: Increase `checkpoint_interval_rows` for larger transformer batches (lower latency when reduced)
 - **Low cardinality**: Disable `low_cardinality_strings` if memory is limited
 - **CDC batching**: Adjust `batch_delay_seconds` for optimal performance:
   - `0` = immediate processing (no batching)
   - `5-15` = good balance for most workloads
   - `30+` = for high-volume, less time-sensitive scenarios
+- **Query merging**: Set `prepared_queries_merge_rows_limit` to merge back-to-back inserts
 
 ### CDC Batching Configuration
 

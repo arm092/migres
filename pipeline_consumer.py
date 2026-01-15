@@ -106,6 +106,61 @@ class PipelineConsumer:
         # Cache for ClickHouse column types: {table: [column_name, column_type, ...]}
         self._column_types_cache = {}
         self._column_types_cache_lock = threading.Lock()
+
+    def _merge_prepared_queries(self, queries):
+        """
+        Merge consecutive compatible prepared queries to reduce query count.
+        Preserves original order; only merges back-to-back queries with same sql/table/schema.
+        """
+        merge_limit = self.mig_cfg.get("cdc", {}).get("prepared_queries_merge_rows_limit", 0)
+        if merge_limit is not None and merge_limit <= 0:
+            merge_limit = None
+
+        merged = []
+        for q in queries:
+            sql = q.get('sql')
+            params = q.get('params')
+            table = q.get('table')
+            schema = q.get('schema')
+            is_ddl = sql.strip().upper().startswith(('DROP ', 'CREATE ', 'ALTER ', 'TRUNCATE '))
+
+            if is_ddl or not params:
+                merged.append({
+                    "sql": sql,
+                    "params": params,
+                    "table": table,
+                    "schema": schema,
+                    "ids": [q.get('id')],
+                    "is_ddl": is_ddl,
+                })
+                continue
+
+            merge_key = (sql, table, schema)
+            if merged:
+                last = merged[-1]
+                if (
+                    not last.get("is_ddl")
+                    and last.get("params")
+                    and last.get("merge_key") == merge_key
+                ):
+                    current_rows = len(last["params"])
+                    incoming_rows = len(params)
+                    if merge_limit is None or (current_rows + incoming_rows) <= merge_limit:
+                        last["params"].extend(params)
+                        last["ids"].append(q.get('id'))
+                        continue
+
+            merged.append({
+                "sql": sql,
+                "params": params,
+                "table": table,
+                "schema": schema,
+                "ids": [q.get('id')],
+                "is_ddl": is_ddl,
+                "merge_key": merge_key,
+            })
+
+        return merged
     
     def _get_column_types(self, table, sql):
         """
@@ -190,15 +245,17 @@ class PipelineConsumer:
                     time.sleep(self.mig_cfg.get("cdc", {}).get('batch_delay_seconds', 5))
                     continue
 
+                merged_queries = self._merge_prepared_queries(queries)
                 processed_ids = []
 
                 # 2. Execute Queries
-                for q in queries:
+                for q in merged_queries:
                     try:
                         sql = q['sql']
                         params = q['params']
                         table = q.get('table')
-                        is_ddl = sql.strip().upper().startswith(('DROP ', 'CREATE ', 'ALTER ', 'TRUNCATE '))
+                        is_ddl = q.get('is_ddl', False)
+                        query_ids = q.get('ids', [q.get('id')])
 
                         # For DDL queries (like deferred DROP), execute directly
                         if is_ddl:
@@ -209,7 +266,7 @@ class PipelineConsumer:
                                 log.info(f"Consumer: DDL executed: {sql[:100]}... ({exec_time:.2f}s)")
                             if exec_time > self._slow_query_threshold:
                                 log.warning(f"Consumer: SLOW DDL query took {exec_time:.2f}s: {sql[:200]}")
-                            processed_ids.append(q['id'])
+                            processed_ids.extend(query_ids)
                             continue
 
                         # Execute query directly - retry once if table doesn't exist
@@ -284,10 +341,10 @@ class PipelineConsumer:
                             log.info(
                                 f"Consumer: INSERT {row_count} rows into {table} ({exec_time:.2f}s)")
 
-                        processed_ids.append(q['id'])
+                        processed_ids.extend(query_ids)
 
                     except Exception as e:
-                        log.exception(f"Consumer failed to execute query id={q['id']}")
+                        log.exception(f"Consumer failed to execute query ids={query_ids}")
                         # Send notification with full query details before crashing
                         error_msg = f"Execution failed: {str(e)}"
                         notify_cdc_error(
@@ -295,7 +352,7 @@ class PipelineConsumer:
                             f"{q.get('schema')}.{q.get('table')}",
                             error_msg,
                             {
-                                "Query ID": q['id'],
+                                "Query IDs": query_ids,
                                 "SQL": q['sql'],
                                 "Params": str(q.get('params', []))[:500] if q.get('params') else None,
                                 "Schema": q.get('schema'),
