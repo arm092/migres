@@ -35,9 +35,17 @@ def _convert_for_clickhouse(v, column_type=None):
         return v
     elif isinstance(v, str) and column_type:
         # Check if column type requires datetime/date conversion
-        column_type_lower = column_type.lower()
-        # Check for Date type
-        if column_type_lower.startswith('date') and not column_type_lower.startswith('datetime'):
+        # Handle Nullable types: Nullable(Date) -> Date, Nullable(DateTime64(...)) -> DateTime64(...)
+        column_type_normalized = column_type.lower().strip()
+        # Remove Nullable wrapper if present
+        if column_type_normalized.startswith('nullable(') and column_type_normalized.endswith(')'):
+            # Extract inner type: Nullable(Date) -> Date
+            inner_type = column_type_normalized[9:-1].strip()
+        else:
+            inner_type = column_type_normalized
+        
+        # Check for Date type (but not DateTime/DateTime64)
+        if inner_type == 'date' or (inner_type.startswith('date') and 'datetime' not in inner_type):
             # Date column - convert date strings to date objects
             if ISO_DATE_PATTERN.match(v):
                 try:
@@ -45,7 +53,7 @@ def _convert_for_clickhouse(v, column_type=None):
                 except (ValueError, TypeError):
                     return v
         # Check for DateTime/DateTime64 types
-        elif 'datetime' in column_type_lower:
+        elif 'datetime' in inner_type:
             # DateTime column - convert datetime strings to datetime objects
             if ISO_DATETIME_PATTERN.match(v):
                 try:
@@ -156,6 +164,10 @@ class PipelineConsumer:
             # Map SQL columns to types
             column_types = [column_info.get(col, 'String') for col in sql_columns]
             
+            # Debug logging to verify types
+            if self.mig_cfg.get('debug'):
+                log.debug(f"Column types for {table}: {dict(zip(sql_columns, column_types))}")
+            
             # Cache the result
             with self._column_types_cache_lock:
                 self._column_types_cache[table] = (sql_columns, column_types)
@@ -171,7 +183,8 @@ class PipelineConsumer:
         while True:
             try:
                 # 1. Fetch Batch of Prepared Queries
-                queries = self.buffer.fetch_prepared_queries_batch(limit=100)
+                limit = self.mig_cfg.get("cdc", {}).get('prepared_queries_batch_limit', 100)
+                queries = self.buffer.fetch_prepared_queries_batch(limit=limit)
 
                 if not queries:
                     time.sleep(self.mig_cfg.get("cdc", {}).get('batch_delay_seconds', 5))
@@ -220,6 +233,11 @@ class PipelineConsumer:
                                     # Step 2: Get column types and convert for ClickHouse compatibility
                                     try:
                                         column_types = self._get_column_types(table, sql)
+                                        if column_types is None:
+                                            log.warning(f"Could not get column types for {table}, converting without type info")
+                                        elif self.mig_cfg.get('debug') and len(deserialized_params) > 0:
+                                            # Log first row's types for debugging
+                                            log.debug(f"Column types for {table}: {column_types[:5]}... (showing first 5)")
                                         clickhouse_params = [_convert_row_for_clickhouse(row, column_types) for row in deserialized_params]
                                     except Exception as convert_err:
                                         # Wrap error with context about conversion step

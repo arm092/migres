@@ -190,12 +190,11 @@ migration:
     snapshot_before: true  # Run snapshot before CDC
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000
-    checkpoint_interval_seconds: 5
+    prepared_queries_batch_limit: 100 # Consumer batch size for execution
     batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
     server_id: 4379  # Unique ID for binlog replication
 
 state_file: "data/state.json"
-checkpoint_file: "data/binlog_checkpoint.json"
 
 # MS Teams Notifications
 notifications:
@@ -441,7 +440,7 @@ docker compose up
 
 - **Batch size**: Increase `batch_rows` for faster snapshot (default: 5000)
 - **Workers**: Adjust `workers` based on CPU cores (default: 4)
-- **Checkpoint frequency**: Reduce `checkpoint_interval_seconds` for more frequent saves
+- **Checkpoint frequency**: Reduce `checkpoint_interval_rows` for more frequent saves
 - **Low cardinality**: Disable `low_cardinality_strings` if memory is limited
 - **CDC batching**: Adjust `batch_delay_seconds` for optimal performance:
   - `0` = immediate processing (no batching)

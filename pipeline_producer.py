@@ -2,7 +2,8 @@ import logging
 import sys
 import threading
 import time
-from datetime import datetime
+import re
+from datetime import datetime, date
 from mysql_client import MySQLClient
 from state_json import StateJson
 from buffer import BufferDB
@@ -99,7 +100,7 @@ class PipelineProducer:
             except UnicodeDecodeError:
                 import base64
                 return base64.b64encode(v).decode('ascii')
-        elif isinstance(v, (datetime,)):
+        elif isinstance(v, (datetime, date)):
             return v.isoformat()
         elif isinstance(v, dict):
             return {k: self._serialize_value(val) for k, val in v.items()}

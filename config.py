@@ -22,6 +22,7 @@ def load_config(path):
     if "cdc" not in cfg["migration"]:
         cfg["migration"]["cdc"] = {}
     cfg["migration"]["cdc"].setdefault("batch_delay_seconds", 0)
+    cfg["migration"]["cdc"].setdefault("prepared_queries_batch_limit", 100)
     # include_tables empty => all tables
     if cfg["mysql"].get("include_tables") is None:
         cfg["mysql"]["include_tables"] = []
@@ -115,8 +116,7 @@ def _apply_env_overrides(cfg):
     cdc_overrides = {
         "CDC_BATCH_DELAY_SECONDS": "batch_delay_seconds",
         "CDC_HEARTBEAT_SECONDS": "heartbeat_seconds",
-        "CDC_CHECKPOINT_INTERVAL_ROWS": "checkpoint_interval_rows",
-        "CDC_CHECKPOINT_INTERVAL_SECONDS": "checkpoint_interval_seconds"
+        "CDC_CHECKPOINT_INTERVAL_ROWS": "checkpoint_interval_rows"
     }
     
     for env_var, config_key in cdc_overrides.items():

@@ -27,6 +27,7 @@ class NotificationLevel(Enum):
 def _extract_exception_info(exc: Optional[Exception] = None, tb=None) -> Dict[str, str]:
     """
     Extract exception location information (filename, line number, function name)
+    Finds the first frame from user's codebase (not vendor libraries)
     
     Args:
         exc: Exception object (optional)
@@ -35,12 +36,7 @@ def _extract_exception_info(exc: Optional[Exception] = None, tb=None) -> Dict[st
     Returns:
         Dictionary with exception location details
     """
-    location_info = {
-        "Exception Location": "Unknown",
-        "File": "Unknown",
-        "Line": "Unknown",
-        "Function": "Unknown"
-    }
+    location_info = {}
     
     try:
         if tb is None:
@@ -53,35 +49,44 @@ def _extract_exception_info(exc: Optional[Exception] = None, tb=None) -> Dict[st
                 tb = exc.__traceback__
         
         if tb is not None:
-            # Get the last frame in the traceback (where exception was raised)
+            import os
+            
+            # Collect all frames from user's codebase (not just the first one)
+            # This gives us more context about where the error occurred
+            user_frames = []
             frame = tb
-            while frame.tb_next is not None:
+            
+            while frame is not None:
+                frame_info = frame.tb_frame
+                filename = frame_info.f_code.co_filename
+                
+                # Check if this is user's code (not vendor code)
+                # Skip: site-packages, dist-packages, clickhouse_driver, .pyx files (Cython)
+                if (not any(skip in filename for skip in ['site-packages', 'dist-packages', 'clickhouse_driver', '.pyx']) 
+                    and filename.endswith('.py')):
+                    filename_short = os.path.basename(filename)
+                    line_no = frame.tb_lineno
+                    function_name = frame_info.f_code.co_name
+                    user_frames.append((filename_short, line_no, function_name))
+                
                 frame = frame.tb_next
             
-            # Get frame info
-            frame_info = frame.tb_frame
-            filename = frame_info.f_code.co_filename
-            line_no = frame.tb_lineno
-            function_name = frame_info.f_code.co_name
-            
-            # Extract just the filename (not full path)
-            import os
-            filename_short = os.path.basename(filename)
-            
-            location_info.update({
-                "Exception Location": f"{filename_short}:{line_no} in {function_name}",
-                "File": filename_short,
-                "Line": str(line_no),
-                "Function": function_name
-            })
-            
-            # Also include full path in a separate field (may be truncated)
-            location_info["Full Path"] = filename if len(filename) < 200 else filename[:200] + "..."
+            # If we found user frames, use them
+            if user_frames:
+                # Primary location (first user frame - where error was raised)
+                primary = user_frames[0]
+                location_info["Exception Location"] = f"{primary[0]}:{primary[1]} in {primary[2]}()"
+                
+                # If there are multiple frames, add context (shows call chain)
+                if len(user_frames) > 1:
+                    context_frames = [f"{f[0]}:{f[1]} in {f[2]}()" for f in user_frames[1:3]]  # Max 2 additional frames
+                    if context_frames:
+                        location_info["Call Chain"] = " → ".join(context_frames)
             
     except Exception as e:
         log.debug(f"Failed to extract exception info: {e}")
-        # Return default values
     
+    # Return empty dict if extraction failed
     return location_info
 
 
@@ -150,9 +155,17 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
         }
     ]
 
-    # Add details section if provided
+    # Add details section if provided - each detail as separate TextBlock
     if details:
-        details_items = []
+        # Add separator before details
+        body.append({
+            "type": "TextBlock",
+            "text": "---",
+            "spacing": "Medium",
+            "separator": True
+        })
+        
+        # Add each detail as a separate TextBlock for better formatting
         for key, value in details.items():
             if isinstance(value, (dict, list)):
                 value_str = json.dumps(value, indent=2)
@@ -161,16 +174,13 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
             # Truncate long values to avoid payload size issues
             if len(value_str) > 500:
                 value_str = value_str[:500] + "... (truncated)"
-            details_items.append(f"{key}: {value_str}")
-
-        details_text = "\n".join(details_items)
-        body.append({
-            "type": "TextBlock",
-            "text": f"Details:\n{details_text}",
-            "wrap": True,
-            "spacing": "Medium",
-            "separator": True
-        })
+            
+            body.append({
+                "type": "TextBlock",
+                "text": f"**{key}:** {value_str}",
+                "wrap": True,
+                "spacing": "Small"
+            })
 
     # Create adaptive card
     card = {
@@ -321,18 +331,20 @@ class TeamsNotification:
             "Error Message": error_message
         }
         
-        # Add exception location information
+        # Add exception location information (only if found)
+        location_info = {}
         if exc is not None:
             location_info = _extract_exception_info(exc)
-            details.update(location_info)
         else:
             # Try to get current exception info if available
             try:
                 location_info = _extract_exception_info()
-                if location_info.get("Exception Location") != "Unknown":
-                    details.update(location_info)
             except Exception:
                 pass
+        
+        # Only add location if we found it (avoid duplicates)
+        if location_info:
+            details.update(location_info)
         
         if operation_details:
             details.update(operation_details)

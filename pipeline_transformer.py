@@ -27,7 +27,7 @@ class PipelineTransformer:
         self.ch = CHClient(cfg["clickhouse"], self.mig_cfg)
         self._last_commit_ns = 0
         self._shutdown_flag = threading.Event()
-        
+
         # Cache for table schema
         # table_name -> (insert_cols, mysql_col_names)
         self.table_cache = {}
@@ -146,11 +146,11 @@ class PipelineTransformer:
             return True  # No query to process
             
         query_lower = query.lower().strip()
-        
+
         # Skip transaction control statements (check before logging)
         if query_lower in ("begin", "commit", "rollback", "xa start", "xa end", "xa prepare", "xa commit", "xa rollback") or query_lower.startswith("savepoint"):
             return True
-        
+
         if self.mig_cfg.get('debug'):
             log.info(f"DDL: Processing query: {query[:200]}...")
             
@@ -549,6 +549,6 @@ class PipelineTransformer:
                     log.info("Transformer shutting down due to shutdown flag")
                     break
                 time.sleep(1) # Retry loop
-        
+
         log.info("Pipeline Transformer shutdown complete")
 
