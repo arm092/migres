@@ -40,8 +40,11 @@ CDC_CHECKPOINT_INTERVAL_ROWS=1000
 CDC_CHECKPOINT_INTERVAL_SECONDS=5
 CDC_BATCH_MAX_WAIT_SECONDS=60
 CDC_FORCE_BINLOG_POSITION_USE_STATE=false
+CDC_DB_DEBUG=false
 ```
-**Note:** `CDC_FORCE_BINLOG_POSITION_USE_STATE` - If set to `true`, the producer will always use the binlog position from `state.json` (if available), ignoring the buffer database position. Default is `false`.
+**Notes:**
+- `CDC_FORCE_BINLOG_POSITION_USE_STATE` - If set to `true`, the producer will always use the binlog position from `state.json` (if available), ignoring the buffer database position. Default is `false`.
+- `CDC_DB_DEBUG` - If set to `true`, processed events and queries are moved to `raw_events_processed` and `prepared_queries_processed` tables instead of being deleted. Useful for debugging and auditing. Default is `false`.
 
 ### Notifications Configuration
 ```bash

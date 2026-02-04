@@ -8,8 +8,9 @@ from typing import List, Dict, Tuple, Optional
 log = logging.getLogger(__name__)
 
 class BufferDB:
-    def __init__(self, db_path: str = "data/buffer.db"):
+    def __init__(self, db_path: str = "data/buffer.db", db_debug: bool = False):
         import os
+        self.db_debug = db_debug
         # Resolve to absolute path to avoid issues with working directory
         self.db_path = os.path.abspath(db_path)
         # Ensure directory exists before initialization
@@ -116,6 +117,43 @@ class BufferDB:
             )
         """)
         
+        # Tables 4 & 5: Processed tables (for db_debug mode)
+        if self.db_debug:
+            # Table 4: Raw Events Processed (archive of processed raw events)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS raw_events_processed (
+                    id INTEGER PRIMARY KEY,
+                    binlog_file TEXT NOT NULL,
+                    binlog_pos INTEGER NOT NULL,
+                    schema_name TEXT,
+                    table_name TEXT,
+                    event_type TEXT,
+                    event_data JSON,
+                    created_at TIMESTAMP,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_processed_pos ON raw_events_processed (binlog_file, binlog_pos)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_processed_at ON raw_events_processed (processed_at)")
+            
+            # Table 5: Prepared Queries Processed (archive of processed queries)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS prepared_queries_processed (
+                    id INTEGER PRIMARY KEY,
+                    sql_query TEXT NOT NULL,
+                    params JSON,
+                    group_id TEXT,
+                    schema_name TEXT,
+                    table_name TEXT,
+                    created_at TIMESTAMP,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_prepared_queries_processed_at ON prepared_queries_processed (processed_at)")
+            log.info("DB debug mode enabled: processed tables created")
+        
         conn.commit()
 
     def get_last_committed_pos(self) -> Tuple[Optional[str], Optional[int]]:
@@ -182,7 +220,7 @@ class BufferDB:
         """
         Atomic transaction:
         1. Insert prepared queries
-        2. Delete processed raw events
+        2. Delete or move processed raw events (depending on db_debug)
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -204,12 +242,19 @@ class BufferDB:
                     VALUES (?, ?, ?, ?, ?)
                 """, q_data)
             
-            # 2. Delete Raw Events
+            # 2. Delete or Move Raw Events
             if processed_event_ids:
-                # SQLite has limits on variable count, split if needed but usually batch size is small
                 placeholders = ','.join(['?'] * len(processed_event_ids))
+                if self.db_debug:
+                    # Move to processed table instead of deleting
+                    cursor.execute(f"""
+                        INSERT INTO raw_events_processed 
+                        (id, binlog_file, binlog_pos, schema_name, table_name, event_type, event_data, created_at)
+                        SELECT id, binlog_file, binlog_pos, schema_name, table_name, event_type, event_data, created_at
+                        FROM raw_events
+                        WHERE id IN ({placeholders})
+                    """, processed_event_ids)
                 cursor.execute(f"DELETE FROM raw_events WHERE id IN ({placeholders})", processed_event_ids)
-                
             conn.commit()
         except Exception:
             conn.rollback()
@@ -239,12 +284,22 @@ class BufferDB:
         return rows
 
     def delete_prepared_queries(self, query_ids: List[int]):
-        """Delete processed queries"""
+        """Delete or move processed queries (depending on db_debug)"""
         if not query_ids:
             return
         conn = self._get_conn()
         cursor = conn.cursor()
         placeholders = ','.join(['?'] * len(query_ids))
+        if self.db_debug:
+            # Move to processed table instead of deleting
+            cursor.execute(f"""
+                INSERT INTO prepared_queries_processed 
+                (id, sql_query, params, group_id, schema_name, table_name, created_at)
+                SELECT id, sql_query, params, group_id, schema_name, table_name, created_at
+                FROM prepared_queries
+                WHERE id IN ({placeholders})
+            """, query_ids)
+            cursor.execute(f"DELETE FROM prepared_queries WHERE id IN ({placeholders})", query_ids)
         cursor.execute(f"DELETE FROM prepared_queries WHERE id IN ({placeholders})", query_ids)
         conn.commit()
 

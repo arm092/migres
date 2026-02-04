@@ -22,7 +22,9 @@ class PipelineTransformer:
     def __init__(self, cfg):
         self.cfg = cfg
         self.mig_cfg = cfg.get("migration", {})
-        self.buffer = BufferDB()
+        cdc_cfg = self.mig_cfg.get("cdc", {})
+        db_debug = cdc_cfg.get("db_debug", False)
+        self.buffer = BufferDB(db_debug=db_debug)
         self.mysql_client = MySQLClient(cfg["mysql"])
         self.ch = CHClient(cfg["clickhouse"], self.mig_cfg)
         self._last_commit_ns = 0

@@ -100,7 +100,9 @@ class PipelineConsumer:
     def __init__(self, cfg):
         self.cfg = cfg
         self.mig_cfg = cfg.get("migration", {})
-        self.buffer = BufferDB()
+        cdc_cfg = self.mig_cfg.get("cdc", {})
+        db_debug = cdc_cfg.get("db_debug", False)
+        self.buffer = BufferDB(db_debug=db_debug)
         self.ch = CHClient(cfg["clickhouse"], self.mig_cfg)
         self._slow_query_threshold = 5.0  # Log queries slower than 5 seconds
         # Cache for ClickHouse column types: {table: [column_name, column_type, ...]}

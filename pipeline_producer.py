@@ -21,7 +21,8 @@ class PipelineProducer:
         self.mig_cfg = cfg.get("migration", {})
         self.cdc_cfg = self.mig_cfg.get("cdc", {})
         
-        self.buffer = BufferDB()
+        db_debug = self.cdc_cfg.get("db_debug", False)
+        self.buffer = BufferDB(db_debug=db_debug)
         self.state = StateJson(cfg.get("state_file"))
         self.mysql_client = MySQLClient(self.mysql_cfg)
         self._shutdown_flag = threading.Event()

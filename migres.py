@@ -24,7 +24,9 @@ def run_cdc_pipeline(cfg):
     producer = PipelineProducer(cfg)
     transformer = PipelineTransformer(cfg)
     consumer = PipelineConsumer(cfg)
-    buffer_monitor = BufferDB()  # Separate connection for monitoring
+    cdc_cfg = cfg.get("migration", {}).get("cdc", {})
+    db_debug = cdc_cfg.get("db_debug", False)
+    buffer_monitor = BufferDB(db_debug=db_debug)  # Separate connection for monitoring
     
     # Create threads
     producer_thread = threading.Thread(target=producer.run, name="Producer", daemon=True)

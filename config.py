@@ -27,6 +27,7 @@ def load_config(path):
     cfg["migration"]["cdc"].setdefault("prepared_queries_merge_rows_limit", 0)
     cfg["migration"]["cdc"].setdefault("batch_max_wait_seconds", 60)
     cfg["migration"]["cdc"].setdefault("force_binlog_position_use_state", False)
+    cfg["migration"]["cdc"].setdefault("db_debug", False)
     # include_tables empty => all tables
     if cfg["mysql"].get("include_tables") is None:
         cfg["mysql"]["include_tables"] = []
@@ -122,7 +123,8 @@ def _apply_env_overrides(cfg):
         "CDC_HEARTBEAT_SECONDS": ("heartbeat_seconds", int),
         "CDC_CHECKPOINT_INTERVAL_ROWS": ("checkpoint_interval_rows", int),
         "CDC_BATCH_MAX_WAIT_SECONDS": ("batch_max_wait_seconds", int),
-        "CDC_FORCE_BINLOG_POSITION_USE_STATE": ("force_binlog_position_use_state", bool)
+        "CDC_FORCE_BINLOG_POSITION_USE_STATE": ("force_binlog_position_use_state", bool),
+        "CDC_DB_DEBUG": ("db_debug", bool)
     }
     
     for env_var, (config_key, value_type) in cdc_overrides.items():
