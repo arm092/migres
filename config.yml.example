@@ -36,6 +36,7 @@ migration:
     batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
     snapshot_before: true  # Run snapshot before CDC
     server_id: 4379  # Unique ID for binlog replication
+    force_binlog_position_use_state: false  # If true, always use state.json binlog position (ignores buffer DB position)
 
 # Where migres persists its resumable state
 state_file: /app/data/state.json

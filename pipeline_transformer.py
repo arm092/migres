@@ -379,18 +379,31 @@ class PipelineTransformer:
         if self.mig_cfg.get('debug'):
             log.info("Starting Pipeline Transformer...")
         
+        last_process_time = time.time()
+        
         while not self._shutdown_flag.is_set():
             try:
                 # 1. Wait for enough raw events (unless disabled)
                 checkpoint_rows = int(self.mig_cfg.get('cdc', {}).get('checkpoint_interval_rows', 5000))
+                batch_max_wait = int(self.mig_cfg.get('cdc', {}).get('batch_max_wait_seconds', 60))
                 fetch_limit = checkpoint_rows if checkpoint_rows > 0 else 5000
 
                 if checkpoint_rows > 0:
                     while not self._shutdown_flag.is_set():
                         stats = self.buffer.get_queue_stats()
                         raw_count = stats.get("raw_events", 0)
+                        
+                        # Check if we should process based on row count
                         if raw_count >= checkpoint_rows:
                             break
+                            
+                        # Check if we should process based on time (if we have any events)
+                        time_since_last = time.time() - last_process_time
+                        if raw_count > 0 and time_since_last >= batch_max_wait:
+                            if self.mig_cfg.get('debug'):
+                                log.info(f"Transformer processing due to time limit ({time_since_last:.1f}s >= {batch_max_wait}s), events: {raw_count}")
+                            break
+                            
                         wait_seconds = self.mig_cfg.get('cdc', {}).get('batch_delay_seconds', 5)
                         if wait_seconds <= 0:
                             wait_seconds = 0.5
@@ -410,6 +423,9 @@ class PipelineTransformer:
                     if self._shutdown_flag.wait(timeout=5):
                         break
                     continue
+                
+                # Update last process time since we are processing events
+                last_process_time = time.time()
                 
                 # 3. Separate events: DDL and data events (preserve DDL order)
                 ddl_events = []  # Keep ALL DDL in original order
@@ -572,4 +588,3 @@ class PipelineTransformer:
                 time.sleep(1) # Retry loop
 
         log.info("Pipeline Transformer shutdown complete")
-

@@ -118,6 +118,8 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
    - Saves binlog position periodically to buffer database
    - Resumes from last committed position on restart
    - State persisted in both buffer database and `state.json` file
+   - By default, producer prioritizes buffer DB position over state.json
+   - Set `force_binlog_position_use_state: true` to always use state.json position (if available)
 
 ---
 
@@ -193,6 +195,8 @@ migration:
     prepared_queries_batch_limit: 100 # Consumer batch size for execution
     prepared_queries_merge_rows_limit: 0 # Merge consecutive queries (0 = disable)
     batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
+    batch_max_wait_seconds: 60 # Max wait time for batch processing even if checkpoint_interval_rows is not reached
+    force_binlog_position_use_state: false  # If true, always use state.json binlog position (ignores buffer DB position)
     server_id: 4379  # Unique ID for binlog replication
 
 state_file: "data/state.json"

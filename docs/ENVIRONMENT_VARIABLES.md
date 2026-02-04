@@ -38,7 +38,10 @@ CDC_BATCH_DELAY_SECONDS=5
 CDC_HEARTBEAT_SECONDS=5
 CDC_CHECKPOINT_INTERVAL_ROWS=1000
 CDC_CHECKPOINT_INTERVAL_SECONDS=5
+CDC_BATCH_MAX_WAIT_SECONDS=60
+CDC_FORCE_BINLOG_POSITION_USE_STATE=false
 ```
+**Note:** `CDC_FORCE_BINLOG_POSITION_USE_STATE` - If set to `true`, the producer will always use the binlog position from `state.json` (if available), ignoring the buffer database position. Default is `false`.
 
 ### Notifications Configuration
 ```bash

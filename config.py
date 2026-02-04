@@ -25,6 +25,8 @@ def load_config(path):
     cfg["migration"]["cdc"].setdefault("prepared_queries_batch_limit", 100)
     cfg["migration"]["cdc"].setdefault("checkpoint_interval_rows", 5000)
     cfg["migration"]["cdc"].setdefault("prepared_queries_merge_rows_limit", 0)
+    cfg["migration"]["cdc"].setdefault("batch_max_wait_seconds", 60)
+    cfg["migration"]["cdc"].setdefault("force_binlog_position_use_state", False)
     # include_tables empty => all tables
     if cfg["mysql"].get("include_tables") is None:
         cfg["mysql"]["include_tables"] = []
@@ -116,19 +118,24 @@ def _apply_env_overrides(cfg):
         cfg["migration"]["cdc"] = {}
     
     cdc_overrides = {
-        "CDC_BATCH_DELAY_SECONDS": "batch_delay_seconds",
-        "CDC_HEARTBEAT_SECONDS": "heartbeat_seconds",
-        "CDC_CHECKPOINT_INTERVAL_ROWS": "checkpoint_interval_rows"
+        "CDC_BATCH_DELAY_SECONDS": ("batch_delay_seconds", int),
+        "CDC_HEARTBEAT_SECONDS": ("heartbeat_seconds", int),
+        "CDC_CHECKPOINT_INTERVAL_ROWS": ("checkpoint_interval_rows", int),
+        "CDC_BATCH_MAX_WAIT_SECONDS": ("batch_max_wait_seconds", int),
+        "CDC_FORCE_BINLOG_POSITION_USE_STATE": ("force_binlog_position_use_state", bool)
     }
     
-    for env_var, config_key in cdc_overrides.items():
+    for env_var, (config_key, value_type) in cdc_overrides.items():
         if env_var in os.environ:
             value = os.environ[env_var]
-            try:
-                value = int(value)
-            except ValueError:
-                log.warning(f"Invalid numeric value for {env_var}: {value}")
-                continue
+            if value_type == bool:
+                value = value.lower() in ("true", "1", "yes", "on")
+            elif value_type == int:
+                try:
+                    value = int(value)
+                except ValueError:
+                    log.warning(f"Invalid numeric value for {env_var}: {value}")
+                    continue
             cfg["migration"]["cdc"][config_key] = value
             log.info(f"Override: migration.cdc.{config_key} = {value}")
     

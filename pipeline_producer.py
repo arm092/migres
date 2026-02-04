@@ -37,16 +37,27 @@ class PipelineProducer:
         self.heartbeat_seconds = int(self.cdc_cfg.get("heartbeat_seconds", 5))
         
         # Determine start position
-        # Priority: 1. Buffer's last committed position, 2. State file
+        # Priority depends on force_binlog_position_use_state config:
+        # - If true: Always use state.json if available (ignores buffer DB)
+        # - If false: 1. Buffer's last committed position, 2. State file
+        force_use_state = self.cdc_cfg.get("force_binlog_position_use_state", False)
         buf_file, buf_pos = self.buffer.get_last_committed_pos()
         state_binlog = self.state.get_binlog()
         
-        if buf_file and buf_pos:
+        if force_use_state and state_binlog:
+            # Force use state.json position if available
+            self.start_file = state_binlog["file"]
+            self.start_pos = state_binlog["pos"]
+            if self.mig_cfg.get('debug'):
+                log.info(f"Producer starting from State file position (forced): {self.start_file}:{self.start_pos}")
+        elif buf_file and buf_pos and not force_use_state:
+            # Use buffer position (default behavior when not forcing state)
             self.start_file = buf_file
             self.start_pos = buf_pos
             if self.mig_cfg.get('debug'):
                 log.info(f"Producer starting from Buffer position: {self.start_file}:{self.start_pos}")
         elif state_binlog:
+            # Fallback to state file if buffer has no position
             self.start_file = state_binlog["file"]
             self.start_pos = state_binlog["pos"]
             if self.mig_cfg.get('debug'):
