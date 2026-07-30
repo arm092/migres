@@ -7,7 +7,7 @@ import json
 import logging
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, Optional, Tuple
 
@@ -149,7 +149,7 @@ def _create_adaptive_card(title: str, message: str, level: NotificationLevel,
         },
         {
             "type": "TextBlock",
-            "text": f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            "text": f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
             "spacing": "Small",
             "isSubtle": True
         }
@@ -231,7 +231,7 @@ class TeamsNotification:
         if self.rate_limit_seconds <= 0:
             return True
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         last_time = self.last_notification_time.get(notification_type)
 
         if last_time is None:
@@ -410,7 +410,7 @@ class TeamsNotification:
             message = "CDC (Change Data Capture) process has started successfully"
 
         details = {
-            "Startup Time": datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
+            "Startup Time": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
             "Configuration": config_summary
         }
         
@@ -428,7 +428,7 @@ class TeamsNotification:
         message = f"CDC process has stopped. Reason: {reason}"
         
         details = {
-            "Shutdown Time": datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
+            "Shutdown Time": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
             "Reason": reason
         }
         

@@ -11,6 +11,9 @@ MYSQL_PORT=3306
 MYSQL_USER=repluser
 MYSQL_PASSWORD=your-password
 MYSQL_DATABASE=source_db
+# Optional TLS
+MYSQL_SSL_CA=/path/to/ca.pem
+MYSQL_SSL_DISABLED=false
 ```
 
 ### ClickHouse Configuration
@@ -20,6 +23,10 @@ CLICKHOUSE_PORT=9000
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=your-password
 CLICKHOUSE_DATABASE=target_db
+# Optional TLS
+CLICKHOUSE_SECURE=true
+CLICKHOUSE_VERIFY=true
+CLICKHOUSE_CA_CERTS=/path/to/ca.pem
 ```
 
 ### Migration Configuration
@@ -37,14 +44,15 @@ MIGRATION_DEBUG=true
 CDC_BATCH_DELAY_SECONDS=5
 CDC_HEARTBEAT_SECONDS=5
 CDC_CHECKPOINT_INTERVAL_ROWS=1000
-CDC_CHECKPOINT_INTERVAL_SECONDS=5
 CDC_BATCH_MAX_WAIT_SECONDS=60
-CDC_FORCE_BINLOG_POSITION_USE_STATE=false
+CDC_PRODUCER_BATCH_SIZE=100
+CDC_PREPARED_QUERIES_BATCH_LIMIT=100
+CDC_FORCE_BINLOG_POSITION="mysql-bin.000123:6855245"
 CDC_DB_DEBUG=false
 ```
 **Notes:**
-- `CDC_FORCE_BINLOG_POSITION_USE_STATE` - If set to `true`, the producer will always use the binlog position from `state.json` (if available), ignoring the buffer database position. Default is `false`.
-- `CDC_DB_DEBUG` - If set to `true`, processed events and queries are moved to `raw_events_processed` and `prepared_queries_processed` tables instead of being deleted. Useful for debugging and auditing. Default is `false`.
+- `CDC_FORCE_BINLOG_POSITION` - Optional binlog position in "file:position" format (e.g., "mysql-bin.000123:6855245"). Used by SIGUSR2 reposition handler to set a specific binlog position. If not set, SIGUSR2 signal is ignored. Default is not set (null).
+- `CDC_DB_DEBUG` - If set to `true`, processed events and queries are archived to ClickHouse debug tables instead of being deleted. Useful for debugging and auditing. Default is `false`.
 
 ### Notifications Configuration
 ```bash
@@ -55,8 +63,8 @@ NOTIFICATIONS_RATE_LIMIT_SECONDS=60
 
 ### File Paths
 ```bash
-CHECKPOINT_FILE=/app/data/binlog_checkpoint.json
 STATE_FILE=/app/data/state.json
+BUFFER_FILE=/app/data/buffer.db
 ```
 
 ### Environment Name
@@ -77,6 +85,7 @@ docker run -e MYSQL_HOST=mysql-server \
            -e MYSQL_PASSWORD=secret \
            -e CLICKHOUSE_HOST=ch-server \
            -e CLICKHOUSE_PASSWORD=secret \
+           -e BUFFER_FILE=/app/data/buffer.db \
            -e MIGRATION_DEBUG=true \
            migres:latest
 ```
@@ -92,6 +101,8 @@ services:
       - MYSQL_PASSWORD=secret
       - CLICKHOUSE_HOST=clickhouse-server
       - CLICKHOUSE_PASSWORD=secret
+      - STATE_FILE=/app/data/state.json
+      - BUFFER_FILE=/app/data/buffer.db
       - NOTIFICATIONS_ENABLED=true
       - NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
       - ENVIRONMENT=prod
@@ -125,6 +136,8 @@ spec:
             secretKeyRef:
               name: clickhouse-secret
               key: password
+        - name: BUFFER_FILE
+          value: "/app/data/buffer.db"
         - name: MIGRATION_DEBUG
           value: "true"
 ```
@@ -141,8 +154,9 @@ spec:
 
 - **Priority**: Environment variables always override config.yml values
 - **Type Safety**: Invalid values (e.g., non-numeric ports) are ignored with warnings
-- **Boolean Values**: For `NOTIFICATIONS_ENABLED` and `MIGRATION_DEBUG`, use `true`, `1`, `yes`, or `on` for true
+- **Boolean Values**: For `NOTIFICATIONS_ENABLED`, `MIGRATION_DEBUG`, `CLICKHOUSE_SECURE`, `CLICKHOUSE_VERIFY`, and `MYSQL_SSL_DISABLED`, use `true`, `1`, `yes`, or `on` for true
 - **Secrets**: Use environment variables for sensitive data like passwords
+- **Buffer path**: `BUFFER_FILE` must be writable; there is no fallback to `/tmp`
 - **Logging**: Check logs to see which values were overridden
 
 ## 🧪 Testing
@@ -160,6 +174,10 @@ export CLICKHOUSE_HOST=test-ch.example.com
 export CLICKHOUSE_PORT=9001
 python migres.py
 
+# Test buffer path
+export BUFFER_FILE=/tmp/migres-test-buffer.db
+python migres.py
+
 # Test notifications
 export NOTIFICATIONS_ENABLED=true
 export NOTIFICATIONS_WEBHOOK_URL=https://test-webhook.com
@@ -172,6 +190,12 @@ python migres.py
 # Test debug mode
 export MIGRATION_DEBUG=true
 python migres.py
+```
+
+For automated tests:
+```bash
+pytest test/unit
+docker compose -f docker-compose.test.yml up -d && pytest -m e2e
 ```
 
 The tool will log all overrides, making it easy to verify that environment variables are being applied correctly.

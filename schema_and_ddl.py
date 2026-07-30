@@ -1,5 +1,27 @@
 import logging
+import re
+
 log = logging.getLogger(__name__)
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NUMERIC_DEFAULT_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def quote_ident(name: str) -> str:
+    """Quote a SQL identifier with backticks, escaping embedded backticks.
+
+    Raises ValueError for empty/None names. Prefer simple identifiers matching
+    ^[A-Za-z_][A-Za-z0-9_]*$; others are still quoted safely by doubling `.
+    """
+    if name is None:
+        raise ValueError("identifier is None")
+    s = str(name)
+    if not s:
+        raise ValueError("identifier is empty")
+    if not _IDENT_RE.match(s):
+        log.warning("Unusual SQL identifier (will be quoted): %r", s)
+    return "`" + s.replace("`", "``") + "`"
+
 
 def map_mysql_to_ch_type(column, mig_cfg=None):
     """
@@ -21,7 +43,7 @@ def map_mysql_to_ch_type(column, mig_cfg=None):
     # Numeric / int types
     if data_type in ("tinyint", "smallint", "mediumint", "int", "integer", "bigint"):
         unsigned = "unsigned" in mysql_type
-        sizes = {"tinyint":8, "smallint":16, "mediumint":32, "int":32, "integer":32, "bigint":64}
+        sizes = {"tinyint": 8, "smallint": 16, "mediumint": 32, "int": 32, "integer": 32, "bigint": 64}
         bits = sizes.get(data_type, 32)
         base = f"UInt{bits}" if unsigned else f"Int{bits}"
         return wrap(base)
@@ -32,8 +54,6 @@ def map_mysql_to_ch_type(column, mig_cfg=None):
         return wrap("Float64")
 
     if data_type in ("decimal", "numeric"):
-        # parse precision/scale: column.COLUMN_TYPE looks like decimal(p,s)
-        import re
         m = re.search(r"\((\d+),\s*(\d+)\)", mysql_type)
         if m:
             p, s = m.group(1), m.group(2)
@@ -44,7 +64,6 @@ def map_mysql_to_ch_type(column, mig_cfg=None):
     if data_type == "date":
         return wrap("Date")
     if data_type in ("datetime", "timestamp"):
-        # Use DateTime64 with timezone support for proper analytical queries
         if mig_cfg and mig_cfg.get("clickhouse_timezone"):
             timezone = mig_cfg["clickhouse_timezone"]
             return wrap(f"DateTime64(3, '{timezone}')")
@@ -60,8 +79,12 @@ def map_mysql_to_ch_type(column, mig_cfg=None):
     if "blob" in data_type or "binary" in data_type:
         return wrap("String")
 
-    # fallback
     return wrap("String")
+
+
+def _escape_sql_string(s: str) -> str:
+    """Escape a value for use inside a single-quoted ClickHouse string literal."""
+    return str(s).replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _default_expr_for_column(col, ch_type):
@@ -69,21 +92,148 @@ def _default_expr_for_column(col, ch_type):
     default_val = col.get("COLUMN_DEFAULT")
     if default_val is None:
         return None
-    # For NULL defaults, ClickHouse default is implicit for Nullable types.
-    # For numeric and strings, we can use a literal.
     dt = str(col.get("DATA_TYPE") or "").lower()
-    if dt in ("tinyint","smallint","mediumint","int","integer","bigint","float","double","real","decimal","numeric"):
-        return str(default_val)
-    if dt in ("date","datetime","timestamp"):
-        # For DateTime64, use parseDateTimeBestEffort to handle various formats
+    if dt in ("tinyint", "smallint", "mediumint", "int", "integer", "bigint", "float", "double", "real", "decimal", "numeric"):
+        s = str(default_val).strip()
+        if _NUMERIC_DEFAULT_RE.match(s):
+            return s
+        # Non-numeric default for a numeric column — fall through to string path
+        return f"'{_escape_sql_string(s)}'"
+    if dt in ("date", "datetime", "timestamp"):
+        escaped = _escape_sql_string(default_val)
         if "DateTime64" in ch_type:
-            return f"parseDateTimeBestEffort('{str(default_val)}')"
-        # For Date/DateTime types, use toDate/parseDateTimeBestEffort
-        return f"toDateTime('{str(default_val)}')" if "DateTime" in ch_type else f"toDate('{str(default_val)}')"
-    # Treat others as strings
-    # Ensure single quotes escaped
-    s = str(default_val).replace("'", "\\'")
-    return f"'{s}'"
+            return f"parseDateTimeBestEffort('{escaped}')"
+        return f"toDateTime('{escaped}')" if "DateTime" in ch_type else f"toDate('{escaped}')"
+    return f"'{_escape_sql_string(default_val)}'"
+
+
+def map_with_low_cardinality(col, mig_cfg):
+    """Map MySQL type to ClickHouse type, wrapping String in LowCardinality when enabled."""
+    ch_type = map_mysql_to_ch_type(col, mig_cfg)
+    # Match bare String or Nullable(String); endswith("String") fails for Nullable(...).
+    if bool(mig_cfg.get("low_cardinality_strings", True)) and ch_type in ("String", "Nullable(String)"):
+        if ch_type.startswith("Nullable("):
+            ch_type = "Nullable(LowCardinality(String))"
+        else:
+            ch_type = f"LowCardinality({ch_type})"
+    return ch_type
+
+
+def binlog_position_key(file_name, pos):
+    """Return a comparable key for binlog (file, pos) with numeric suffix comparison."""
+    if not file_name:
+        return ("", 0, 0)
+    base = str(file_name)
+    suffix = 0
+    m = re.search(r"(\d+)$", base)
+    if m:
+        prefix = base[: m.start()]
+        suffix = int(m.group(1))
+        return (prefix, suffix, int(pos or 0))
+    return (base, 0, int(pos or 0))
+
+
+def strip_sql_leading_comments(query: str) -> str:
+    """Strip leading whitespace and SQL comments from a statement."""
+    if not query:
+        return ""
+    s = query.strip()
+    while True:
+        if s.startswith("--"):
+            nl = s.find("\n")
+            if nl < 0:
+                return ""
+            s = s[nl + 1:].lstrip()
+            continue
+        if s.startswith("#"):
+            nl = s.find("\n")
+            if nl < 0:
+                return ""
+            s = s[nl + 1:].lstrip()
+            continue
+        if s.startswith("/*"):
+            end = s.find("*/")
+            if end < 0:
+                return ""
+            s = s[end + 2:].lstrip()
+            continue
+        break
+    return s
+
+
+# DDL patterns anchored to statement start after comment stripping
+DDL_CREATE_TABLE_PATTERN = re.compile(
+    r"^create\s+table\s+(?:if\s+not\s+exists\s+)?(?:`?(?P<db>\w+)`?\.)?`?(?P<table>\w+)`?",
+    re.IGNORECASE,
+)
+DDL_DROP_TABLE_PATTERN = re.compile(
+    r"^drop\s+table\s+(?:if\s+exists\s+)?(?P<body>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+DDL_ALTER_TABLE_PATTERN = re.compile(
+    r"^alter\s+table\s+(?:`?(?P<db>\w+)`?\.)?`?(?P<table>\w+)`?",
+    re.IGNORECASE,
+)
+DDL_TRUNCATE_TABLE_PATTERN = re.compile(
+    r"^truncate\s+(?:table\s+)?(?:`?(?P<db>\w+)`?\.)?`?(?P<table>\w+)`?",
+    re.IGNORECASE,
+)
+DDL_RENAME_TABLE_PATTERN = re.compile(
+    r"^rename\s+table\s+(?P<body>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_TABLE_REF_RE = re.compile(r"(?:`?(?P<db>\w+)`?\.)?`?(?P<table>\w+)`?", re.IGNORECASE)
+
+
+def parse_drop_table_names(query: str):
+    """Return list of table names from a DROP TABLE statement (supports multi-table)."""
+    cleaned = strip_sql_leading_comments(query)
+    m = DDL_DROP_TABLE_PATTERN.match(cleaned)
+    if not m:
+        return []
+    body = m.group("body").split(";")[0]
+    names = []
+    for part in body.split(","):
+        tm = _TABLE_REF_RE.search(part.strip())
+        if tm:
+            names.append(tm.group("table"))
+    return names
+
+
+def parse_rename_table_pairs(query: str):
+    """Return list of (old_name, new_name) from RENAME TABLE statement."""
+    cleaned = strip_sql_leading_comments(query)
+    m = DDL_RENAME_TABLE_PATTERN.match(cleaned)
+    if not m:
+        return []
+    body = m.group("body").split(";")[0]
+    pairs = []
+    for part in body.split(","):
+        # old TO new
+        parts = re.split(r"\s+to\s+", part.strip(), flags=re.IGNORECASE)
+        if len(parts) != 2:
+            continue
+        old_m = _TABLE_REF_RE.search(parts[0].strip())
+        new_m = _TABLE_REF_RE.search(parts[1].strip())
+        if old_m and new_m:
+            pairs.append((old_m.group("table"), new_m.group("table")))
+    return pairs
+
+
+def parse_ddl_table_name(query: str, kind: str):
+    """Parse single-table DDL (create/alter/truncate). Returns table name or None."""
+    cleaned = strip_sql_leading_comments(query)
+    pattern = {
+        "create": DDL_CREATE_TABLE_PATTERN,
+        "alter": DDL_ALTER_TABLE_PATTERN,
+        "truncate": DDL_TRUNCATE_TABLE_PATTERN,
+    }.get(kind)
+    if not pattern:
+        return None
+    m = pattern.match(cleaned)
+    if not m:
+        return None
+    return m.group("table")
 
 
 def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
@@ -97,36 +247,29 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
     col_defs = []
     mysql_col_names = []
     synthesized = None
+    qtable = quote_ident(table)
 
     for col in columns_meta:
         name = col["COLUMN_NAME"]
         mysql_col_names.append(name)
         ch_type = map_mysql_to_ch_type(col, mig_cfg)
         default_expr = _default_expr_for_column(col, ch_type)
+        qname = quote_ident(name)
         if default_expr is not None:
-            col_defs.append(f"`{name}` {ch_type} DEFAULT {default_expr}")
+            col_defs.append(f"{qname} {ch_type} DEFAULT {default_expr}")
         else:
-            col_defs.append(f"`{name}` {ch_type}")
+            col_defs.append(f"{qname} {ch_type}")
 
-    # Add transfer columns (insertable)
     col_defs.append("`__data_transfer_commit_time` UInt64")
     col_defs.append("`__data_transfer_delete_time` UInt64 DEFAULT 0")
-
-    # Add generated is_deleted (MATERIALIZED)
     col_defs.append("`__data_transfer_is_deleted` UInt8 MATERIALIZED if(__data_transfer_delete_time != 0, 1, 0)")
 
-    # If there is no primary key we will add a synthesized materialized PK __migres_pk
     if not pk_columns:
-        # build concat of toString(col1),'|',toString(col2) ...
-        parts = [f"toString(`{c}`)" for c in mysql_col_names]
+        parts = [f"toString({quote_ident(c)})" for c in mysql_col_names]
         concat_expr = " || '|' || ".join(parts) if parts else "''"
-        # materialized cityHash64(concat(...))
         col_defs.insert(0, f"`__migres_pk` UInt64 MATERIALIZED cityHash64({concat_expr})")
         synthesized = "__migres_pk"
 
-    # decide ORDER BY key columns (sorting key)
-    # For ReplacingMergeTree(version), ORDER BY must NOT include the version column;
-    # it must be the natural primary key so replacements collapse correctly.
     if "id" in mysql_col_names:
         key_cols = ["id"]
     elif pk_columns:
@@ -134,21 +277,22 @@ def build_table_ddl(table, columns_meta, pk_columns, mig_cfg):
     elif synthesized:
         key_cols = [synthesized]
     else:
-        # Fallback: if absolutely no identifier, use commit time as the sole key
         key_cols = ["__data_transfer_commit_time"]
 
-    order_by = ", ".join([f"`{c}`" for c in key_cols])
+    order_by = ", ".join([quote_ident(c) for c in key_cols])
 
-    # engine
     if engine.lower().startswith("replacing"):
         engine_sql = f"ENGINE = ReplacingMergeTree(__data_transfer_commit_time)\nORDER BY ({order_by})"
     else:
-        # For plain MergeTree we can include commit time to keep append order deterministic
-        non_replacing_order_by = ", ".join([f"`{c}`" for c in (key_cols + (["__data_transfer_commit_time"] if "__data_transfer_commit_time" not in key_cols else []))])
+        non_replacing_order_by = ", ".join([
+            quote_ident(c) for c in (
+                key_cols + (["__data_transfer_commit_time"] if "__data_transfer_commit_time" not in key_cols else [])
+            )
+        ])
         engine_sql = f"ENGINE = MergeTree()\nORDER BY ({non_replacing_order_by})"
 
     cols_sql = ",\n  ".join(col_defs)
-    ddl = f"CREATE TABLE IF NOT EXISTS `{table}` (\n  {cols_sql}\n) {engine_sql}"
+    ddl = f"CREATE TABLE IF NOT EXISTS {qtable} (\n  {cols_sql}\n) {engine_sql}"
     insertable_columns = mysql_col_names + ["__data_transfer_commit_time", "__data_transfer_delete_time"]
     return ddl, insertable_columns
 
@@ -159,11 +303,11 @@ def ensure_clickhouse_columns(ch_client, table, desired_columns):
     desired_columns: list of dicts {name, type_sql, default_expr(optional)} or tuples (name, type_sql)
     Adds missing columns with ALTER TABLE ... ADD COLUMN if needed.
     """
+    qtable = quote_ident(table)
     try:
-        existing = ch_client.execute(f"DESCRIBE TABLE `{table}`")
+        existing = ch_client.execute(f"DESCRIBE TABLE {qtable}")
         existing_names = {row[0] for row in existing}
     except Exception:
-        # If table doesn't exist, caller should create with DDL
         return
     for item in desired_columns:
         if isinstance(item, tuple):
@@ -175,10 +319,15 @@ def ensure_clickhouse_columns(ch_client, table, desired_columns):
             default_expr = item.get("default_expr")
         if name not in existing_names:
             try:
+                qname = quote_ident(name)
                 if default_expr:
-                    ch_client.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{name}` {type_sql} DEFAULT {default_expr}")
+                    ch_client.execute(
+                        f"ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS {qname} {type_sql} DEFAULT {default_expr}"
+                    )
                 else:
-                    ch_client.execute(f"ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS `{name}` {type_sql}")
+                    ch_client.execute(
+                        f"ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS {qname} {type_sql}"
+                    )
                 log.info("Added missing column %s to %s", name, table)
             except Exception:
                 log.exception("Failed to add column %s to %s", name, table)
