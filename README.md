@@ -37,7 +37,7 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 - 💾 **Checkpoint persistence** (resume from last committed position)
 - 🔒 **Unique server_id per process** (PID-based) prevents MySQL replication conflicts
 - 🌍 **Timezone-aware datetime handling** (DateTime64 with timezone)
-- 🛡️ **Robust error handling** - failed queries moved to `failed_queries` table, don't block CDC sync
+- 🛡️ **Robust error handling** — permanent data/type errors move queries to `failed_queries`; transient network errors crash the consumer for orchestrator restart/retry
 - 📱 **MS Teams notifications** for errors, warnings, and important events
 
 ### Operations
@@ -108,18 +108,16 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
    - **MODIFY COLUMN**: Changes type and defaults
 
 7. **Error handling and reliability**
-   - Failed queries are moved to `failed_queries` table instead of blocking CDC sync
-   - Failed operations don't prevent other queries from processing
-   - Events for dropped tables are gracefully skipped
-   - Includes timestamp, error details, and operation information for manual review
-   - Allows for manual recovery of failed operations
+   - **Permanent errors** (type conversion, bad data, schema mismatch): query is moved to the `failed_queries` table via `BufferDB.move_to_failed`; CDC continues with remaining queries
+   - **Transient errors** (timeouts, connection loss, network): consumer re-raises and the process exits so Kubernetes/Docker can restart and retry `prepared_queries`
+   - Failed operations don't prevent other queries in the same batch from processing
+   - `failed_queries` stores timestamp, error reason, SQL, and params for manual review/recovery
 
 8. **Checkpoint persistence**
    - Saves binlog position periodically to buffer database
    - Resumes from last committed position on restart
    - State persisted in both buffer database and `state.json` file
    - By default, producer prioritizes buffer DB position over state.json
-   - Set `force_binlog_position_use_state: true` to always use state.json position (if available)
    - Set `db_debug: true` to archive processed events/queries in `raw_events_processed` and `prepared_queries_processed` tables for debugging
 
 ---
@@ -169,6 +167,9 @@ mysql:
   database: "your_database"
   include_tables: []  # Leave empty for all tables
   exclude_tables: []  # Tables to skip
+  # Optional TLS:
+  # ssl_ca: /path/to/ca.pem
+  # ssl_disabled: false
 
 clickhouse:
   host: "localhost"
@@ -176,6 +177,10 @@ clickhouse:
   user: "default"
   password: ""
   database: "your_ch_database"
+  # Optional TLS:
+  # secure: true
+  # verify: true
+  # ca_certs: /path/to/ca.pem
 
 migration:
   mode: "snapshot"  # or "cdc"
@@ -194,20 +199,22 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100 # Consumer batch size for execution
-    prepared_queries_merge_rows_limit: 0 # Merge consecutive queries (0 = disable)
     batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
     batch_max_wait_seconds: 60 # Max wait time for batch processing even if checkpoint_interval_rows is not reached
-    force_binlog_position_use_state: false  # If true, always use state.json binlog position (ignores buffer DB position)
+    producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
+    force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)
     db_debug: false  # If true, move processed events/queries to processed tables instead of deleting them
     server_id: 4379  # Unique ID for binlog replication
-
-state_file: "data/state.json"
 
 # MS Teams Notifications
 notifications:
   enabled: true
   webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
   rate_limit_seconds: 60  # Minimum seconds between notifications (0 = no limit)
+
+# Local persistence paths (must be writable)
+state_file: /app/data/state.json
+buffer_file: /app/data/buffer.db  # SQLite CDC buffer; override with BUFFER_FILE env var
 ```
 
 ---
@@ -237,6 +244,123 @@ docker compose up
 docker compose logs -f
 ```
 
+### Reset Feature
+
+The application supports a **reset mechanism** that allows you to perform a complete reset: gracefully shutdown all pipeline threads, drop all ClickHouse tables, delete local data files (`buffer.db` and `state.json`), and exit cleanly. This is useful for starting from scratch in Kubernetes deployments.
+
+**How it works:**
+- Sends SIGUSR1 signal to trigger reset
+- All pipeline threads (Producer, Transformer, Consumer) shutdown gracefully
+- ClickHouse tables managed by migres are dropped (only tables that have the `__data_transfer_commit_time` metadata column)
+- Local data files (`buffer.db` and `state.json`) are deleted
+- Application exits with code 0, allowing Kubernetes to restart the pod
+
+**Usage:**
+
+**From Kubernetes:**
+```bash
+# Get pod name
+kubectl get pods | grep migres
+
+# Send reset signal (PID 1 is the main process in containers)
+kubectl exec <pod-name> -- kill -USR1 1
+
+# Monitor reset progress
+kubectl logs -f <pod-name>
+```
+
+**From command line:**
+```bash
+# Find process ID
+ps aux | grep migres
+# or check application logs for: "Starting CDC Pipeline... [PID: 12345]"
+
+# Send reset signal
+kill -USR1 <process_id>
+```
+
+**Reset Process:**
+1. Signal received → Logs: "Received reset signal (SIGUSR1). Initiating reset..."
+2. Threads shutdown → All pipeline threads are signaled and wait for completion (30s timeout)
+3. Tables dropped → Migres-managed ClickHouse tables are dropped (identified by `__data_transfer_commit_time`)
+4. Files deleted → `buffer.db` and `state.json` are removed
+5. Exit → Application exits with code 0
+
+**Notes:**
+- SIGUSR1 is the standard Unix user-defined signal (signal number 10)
+- Reset is **destructive** — migres-managed tables and local state are deleted; unrelated ClickHouse tables in the same database are kept
+- The application will exit cleanly, allowing Kubernetes to restart it
+- On Windows, SIGUSR1 is not available (handler registration will log a warning)
+- The reset handler logs each step for monitoring progress
+
+### Reposition Feature (SIGUSR2)
+
+The application supports a **reposition mechanism** that allows you to change the binlog position without a full reset: gracefully shutdown all pipeline threads, delete buffer.db, update state.json with a new binlog position from config, and restart all threads. This is useful for repositioning the CDC stream to a specific binlog position.
+
+**How it works:**
+- Requires `force_binlog_position` config to be set (format: "file:position", e.g., "mysql-bin.000123:6855245")
+- Sends SIGUSR2 signal to trigger reposition
+- All pipeline threads (Producer, Transformer, Consumer) shutdown gracefully
+- Buffer database (`buffer.db`) is deleted
+- State file (`state.json`) is updated with new binlog position from config
+- All pipeline threads are restarted (producer will start from new position)
+- Application continues running (does not exit)
+
+**Usage:**
+
+**From Kubernetes:**
+```bash
+# Get pod name
+kubectl get pods | grep migres
+
+# Send reposition signal (PID 1 is the main process in containers)
+kubectl exec <pod-name> -- kill -USR2 1
+
+# Monitor reposition progress
+kubectl logs -f <pod-name>
+```
+
+**From command line:**
+```bash
+# Find process ID
+ps aux | grep migres
+# or check application logs for: "Starting CDC Pipeline... [PID: 12345]"
+
+# Send reposition signal
+kill -USR2 <process_id>
+```
+
+**Configuration:**
+
+Set `force_binlog_position` in your `config.yml`:
+```yaml
+migration:
+  cdc:
+    force_binlog_position: "mysql-bin.000123:6855245"  # Format: "file:position"
+```
+
+Or use environment variable:
+```bash
+export CDC_FORCE_BINLOG_POSITION="mysql-bin.000123:6855245"
+```
+
+**Reposition Process:**
+1. Signal received → Logs: "Received reposition signal (SIGUSR2). Initiating reposition..."
+2. Config check → If `force_binlog_position` not set, logs warning and skips
+3. Threads shutdown → All pipeline threads are signaled and wait for completion (30s timeout)
+4. Buffer deleted → `buffer.db` is removed (safe after threads stopped)
+5. State updated → `state.json` is updated with new binlog position from config
+6. Threads restarted → All pipeline threads are restarted (producer picks up new position)
+7. Continue → Application continues running normally
+
+**Notes:**
+- SIGUSR2 is the standard Unix user-defined signal (signal number 12)
+- Requires `force_binlog_position` config to be set, otherwise signal is ignored
+- Does NOT kill the application - only restarts threads
+- On Windows, SIGUSR2 is not available (handler registration will log a warning)
+- The reposition handler logs each step for monitoring progress
+- All threads are restarted to ensure clean state
+
 ### Environment Variables Support
 
 All configuration options can be overridden using environment variables. This is useful for containerized deployments:
@@ -253,6 +377,14 @@ export CLICKHOUSE_PASSWORD=your-password
 # Migration configuration
 export MIGRATION_DEBUG=true
 
+# Local paths
+export STATE_FILE=/app/data/state.json
+export BUFFER_FILE=/app/data/buffer.db
+
+# Optional TLS
+export MYSQL_SSL_CA=/path/to/ca.pem
+export CLICKHOUSE_SECURE=true
+
 # Notifications
 export NOTIFICATIONS_ENABLED=true
 export NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
@@ -265,21 +397,27 @@ See [Environment Variables Documentation](docs/ENVIRONMENT_VARIABLES.md) for com
 
 ## Testing
 
-The project includes a comprehensive test suite in the `test/` directory:
+Tests use **pytest**. See `config.yml.example` / `test/config.test.yml` for test configuration — never use production credentials.
 
-- **`test/test_cdc_batching.py`** - Main CDC batching test (5000 operations)
-- **`test/test_forced_errors.py`** - Forced error test with type conversion errors
-- **`test/test_notifications.py`** - MS Teams notification system test
-- **`test/run_test.py`** - Test runner for different scenarios
-- **`test/monitor_cdc.py`** - Real-time CDC monitoring
+### Unit tests (no Docker)
 
-### Running Tests
+Fast tests under `test/unit/` (buffer, config, DDL, type mapping, etc.):
+
 ```bash
-cd test
-python run_test.py
+pytest test/unit
 ```
 
-See `test/README.md` for detailed testing instructions.
+### End-to-end tests (Docker)
+
+Start MySQL and ClickHouse test services, then run e2e tests:
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+pytest -m e2e
+docker compose -f docker-compose.test.yml down
+```
+
+Additional integration/reliability tests live under `test/` (batching, crash recovery, schema evolution, etc.). See `test/README.md` for details.
 
 ---
 
@@ -416,8 +554,8 @@ DROP TABLE old_table;
 - UPDATE events create new rows with higher `__data_transfer_commit_time` - ensure OPTIMIZE runs periodically
 
 **4. Migration stuck:**
-- Check `state.json` for incomplete tables
-- Delete state file to restart from beginning
+- Check `state.json` for tables stuck in `in_progress`
+- Delete state file to restart from beginning (or use SIGUSR1 reset in CDC mode)
 - Verify MySQL/ClickHouse connectivity
 
 **5. Timezone issues with datetime columns:**
@@ -428,7 +566,7 @@ DROP TABLE old_table;
 **6. Events accumulating in buffer (raw_events growing):**
 - Check if tables are in `include_tables` - events for excluded tables are automatically filtered
 - Verify CDC pipeline is running (check logs for Producer/Transformer/Consumer threads)
-- Check for failed queries in `failed_queries` table that might be blocking processing
+- Inspect `failed_queries` for poison queries (these no longer block the consumer, but indicate data that needs manual fix)
 
 **7. MySQL replication conflicts (server_id errors):**
 - Each migres process now uses unique server_id (base + PID modulo)
@@ -453,8 +591,6 @@ docker compose up
   - `0` = immediate processing (no batching)
   - `5-15` = good balance for most workloads
   - `30+` = for high-volume, less time-sensitive scenarios
-- **Query merging**: Set `prepared_queries_merge_rows_limit` to merge back-to-back inserts
-
 ### CDC Batching Configuration
 
 The `batch_delay_seconds` setting controls how events are processed:
@@ -499,10 +635,4 @@ Result: 1 ClickHouse INSERT with 100 rows
 ```
 MySQL: 50 UPDATEs for 'users' + 30 INSERTs for 'orders'
 Result: 2 ClickHouse INSERTs (1 with 50 rows, 1 with 30 rows)
-```
-
-**Example 3: Error Handling**
-```
-Failed operation → Dumped to failed_operations_20250922_151207.json
-Contains: timestamp, error details, operation data for manual review
 ```

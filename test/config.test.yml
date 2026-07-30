@@ -1,0 +1,46 @@
+mysql:
+  host: 127.0.0.1
+  port: 3307
+  user: migres
+  password: migrespass
+  database: migres_src
+  include_tables: []
+  exclude_tables: []
+
+clickhouse:
+  host: 127.0.0.1
+  port: 9001
+  user: default
+  password: ""
+  database: migres_dst
+
+migration:
+  mode: cdc
+  debug: true
+  batch_rows: 1000
+  ddl_engine: "ReplacingMergeTree"
+  low_cardinality_strings: false
+  workers: 2
+  clickhouse_timezone: "UTC"
+  cdc:
+    heartbeat_seconds: 5
+    checkpoint_interval_rows: 1
+    prepared_queries_batch_limit: 50
+    batch_delay_seconds: 0
+    batch_max_wait_seconds: 2
+    producer_batch_size: 10
+
+    snapshot_before: true
+    server_id: 9001
+    force_binlog_position: null
+    db_debug: false
+
+state_file: test/.tmp/state.json
+buffer_file: test/.tmp/buffer.db
+
+environment: test
+
+notifications:
+  enabled: false
+  webhook_url: ""
+  rate_limit_seconds: 0
