@@ -14,11 +14,11 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from mysql_client import MySQLClient
-from clickhouse_client import CHClient
-from config import load_config
-from buffer import BufferDB
-from notifications import initialize_notifications, notify_cdc_shutdown
+from migres.clients.mysql import MySQLClient
+from migres.clients.clickhouse import CHClient
+from migres.config import load_config
+from migres.buffer import BufferDB
+from migres.notifications import initialize_notifications, notify_cdc_shutdown
 
 
 def _test_config_path():

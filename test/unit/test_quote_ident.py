@@ -2,7 +2,7 @@
 
 import pytest
 
-from schema_and_ddl import quote_ident
+from migres.schema.ddl import quote_ident
 
 
 pytestmark = pytest.mark.unit

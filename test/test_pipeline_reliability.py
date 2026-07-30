@@ -16,8 +16,8 @@ import pytest
 # Add parent dir to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from buffer import BufferDB
-from notifications import notify_cdc_shutdown
+from migres.buffer import BufferDB
+from migres.notifications import notify_cdc_shutdown
 
 
 def start_migres_process():

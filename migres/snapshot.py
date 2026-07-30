@@ -6,10 +6,10 @@ from decimal import Decimal
 import mysql.connector
 from mysql.connector import Error as MySQLError
 from clickhouse_driver.errors import Error as CHError
-from mysql_client import MySQLClient
-from clickhouse_client import CHClient
-from schema_and_ddl import build_table_ddl, quote_ident
-from state_json import StateJson
+from migres.clients.mysql import MySQLClient
+from migres.clients.clickhouse import CHClient
+from migres.schema.ddl import build_table_ddl, quote_ident
+from migres.state import StateJson
 
 log = logging.getLogger(__name__)
 

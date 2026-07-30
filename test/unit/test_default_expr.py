@@ -2,7 +2,7 @@
 
 import pytest
 
-from schema_and_ddl import _default_expr_for_column
+from migres.schema.ddl import _default_expr_for_column
 
 
 pytestmark = pytest.mark.unit

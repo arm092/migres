@@ -12,8 +12,8 @@ from datetime import datetime
 # Add the parent directory to Python path to import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from clickhouse_client import CHClient
-from config import load_config
+from migres.clients.clickhouse import CHClient
+from migres.config import load_config
 
 def monitor_test_table():
     """Monitor the test_table in ClickHouse to see if CDC is processing events"""

@@ -3,6 +3,7 @@ mysql-connector-python==9.3.0
 PyYAML==6.0.2
 mysql-replication==0.46
 requests==2.32.5
+sqlglot>=25.0.0
 pytest==7.4.3
 pytest-cov==4.1.0
 pytest-timeout==2.2.0

@@ -2,7 +2,7 @@
 
 import pytest
 
-from schema_and_ddl import (
+from migres.schema.ddl import (
     strip_sql_leading_comments,
     parse_ddl_table_name,
     parse_drop_table_names,

@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from config import load_config
+from migres.config import load_config
 
 
 pytestmark = pytest.mark.unit
@@ -63,3 +63,15 @@ def test_prepared_queries_merge_rows_limit_not_in_defaults(config_path, monkeypa
     assert "prepared_queries_merge_rows_limit" not in cdc
     # Sanity: other CDC defaults are still applied
     assert "prepared_queries_batch_limit" in cdc
+
+
+def test_poll_interval_defaults_from_batch_delay(config_path, monkeypatch):
+    monkeypatch.delenv("CDC_PRODUCER_FLUSH_INTERVAL", raising=False)
+    cfg = load_config(config_path)
+    cdc = cfg["migration"]["cdc"]
+    # batch_delay default 0 → resolved intervals use fallbacks
+    assert cdc.resolved_producer_flush_interval() == 0.0
+    assert cdc.resolved_transformer_poll_interval() == 0.5
+    assert cdc.resolved_consumer_poll_interval() == 0.1
+    assert cdc.get("use_gtid") is False
+    assert cdc.get("raw_events_max") == 50000

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "migres"
+version = "1.1.0"
+description = "MySQL to ClickHouse CDC pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "clickhouse-driver==0.2.9",
+  "mysql-connector-python==9.3.0",
+  "PyYAML==6.0.2",
+  "mysql-replication==0.46",
+  "requests==2.32.5",
+  "cryptography>=41.0.0",
+  "sqlglot>=25.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==7.4.3",
+  "pytest-cov==4.1.0",
+  "pytest-timeout==2.2.0",
+  "pytest-xdist==3.5.0",
+]
+
+[project.scripts]
+migres = "migres.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["migres*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "unit: fast tests without external services",
+  "integration: tests needing live MySQL/ClickHouse",
+  "e2e: end-to-end tests with Docker Compose",
+  "slow: long-running tests",
+]
+timeout = 300

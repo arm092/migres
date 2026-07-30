@@ -2,7 +2,7 @@
 
 import pytest
 
-from schema_and_ddl import binlog_position_key
+from migres.schema.ddl import binlog_position_key
 
 
 pytestmark = pytest.mark.unit

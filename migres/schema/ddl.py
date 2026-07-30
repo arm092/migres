@@ -185,8 +185,107 @@ DDL_RENAME_TABLE_PATTERN = re.compile(
 _TABLE_REF_RE = re.compile(r"(?:`?(?P<db>\w+)`?\.)?`?(?P<table>\w+)`?", re.IGNORECASE)
 
 
+def _sqlglot_table_name(expr):
+    """Extract bare table name from a sqlglot Table / identifier expression."""
+    if expr is None:
+        return None
+    try:
+        name = getattr(expr, "name", None) or getattr(expr, "this", None)
+        if name is None:
+            return None
+        if hasattr(name, "name"):
+            return str(name.name)
+        return str(name).strip("`\"")
+    except Exception:
+        return None
+
+
+def _parse_with_sqlglot(query: str):
+    """
+    Try to parse DDL with sqlglot. Returns dict:
+      {"kind": create|drop|alter|truncate|rename, "tables": [...], "pairs": [(old,new), ...]}
+    or None on failure.
+    """
+    cleaned = strip_sql_leading_comments(query)
+    if not cleaned:
+        return None
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return None
+    try:
+        parsed = sqlglot.parse_one(cleaned, read="mysql")
+    except Exception:
+        return None
+    if parsed is None:
+        return None
+
+    if isinstance(parsed, exp.Create) and parsed.kind and str(parsed.kind).upper() == "TABLE":
+        table = _sqlglot_table_name(parsed.this)
+        return {"kind": "create", "tables": [table] if table else [], "pairs": []}
+
+    if isinstance(parsed, exp.Drop) and parsed.kind and str(parsed.kind).upper() == "TABLE":
+        tables = []
+        # sqlglot may put one table in .this; multi-drop may appear as Schema/Var
+        t = _sqlglot_table_name(parsed.this)
+        if t:
+            tables.append(t)
+        for node in parsed.find_all(exp.Table):
+            n = _sqlglot_table_name(node)
+            if n and n not in tables:
+                tables.append(n)
+        return {"kind": "drop", "tables": tables, "pairs": []}
+
+    if isinstance(parsed, exp.Alter) or parsed.__class__.__name__ == "AlterTable":
+        table = _sqlglot_table_name(getattr(parsed, "this", None))
+        return {"kind": "alter", "tables": [table] if table else [], "pairs": []}
+
+    if isinstance(parsed, exp.TruncateTable) or (
+        parsed.__class__.__name__ in ("Truncate", "TruncateTable")
+    ):
+        tables = []
+        for node in parsed.find_all(exp.Table):
+            n = _sqlglot_table_name(node)
+            if n:
+                tables.append(n)
+        if not tables:
+            t = _sqlglot_table_name(getattr(parsed, "this", None))
+            if t:
+                tables.append(t)
+        return {"kind": "truncate", "tables": tables, "pairs": []}
+
+    # RENAME TABLE a TO b — dialect-specific; fall through to regex if not recognized
+    sql_upper = cleaned.lstrip().upper()
+    if sql_upper.startswith("RENAME"):
+        return None
+    return None
+
+
+def detect_ddl_kind(query: str):
+    """Return DDL kind string or None. Prefer sqlglot, fall back to regex."""
+    parsed = _parse_with_sqlglot(query)
+    if parsed and parsed.get("kind"):
+        return parsed["kind"]
+    cleaned = strip_sql_leading_comments(query)
+    if DDL_CREATE_TABLE_PATTERN.match(cleaned):
+        return "create"
+    if DDL_DROP_TABLE_PATTERN.match(cleaned):
+        return "drop"
+    if DDL_ALTER_TABLE_PATTERN.match(cleaned):
+        return "alter"
+    if DDL_TRUNCATE_TABLE_PATTERN.match(cleaned):
+        return "truncate"
+    if DDL_RENAME_TABLE_PATTERN.match(cleaned):
+        return "rename"
+    return None
+
+
 def parse_drop_table_names(query: str):
     """Return list of table names from a DROP TABLE statement (supports multi-table)."""
+    parsed = _parse_with_sqlglot(query)
+    if parsed and parsed.get("kind") == "drop" and parsed.get("tables"):
+        return parsed["tables"]
     cleaned = strip_sql_leading_comments(query)
     m = DDL_DROP_TABLE_PATTERN.match(cleaned)
     if not m:
@@ -222,6 +321,9 @@ def parse_rename_table_pairs(query: str):
 
 def parse_ddl_table_name(query: str, kind: str):
     """Parse single-table DDL (create/alter/truncate). Returns table name or None."""
+    parsed = _parse_with_sqlglot(query)
+    if parsed and parsed.get("kind") == kind and parsed.get("tables"):
+        return parsed["tables"][0]
     cleaned = strip_sql_leading_comments(query)
     pattern = {
         "create": DDL_CREATE_TABLE_PATTERN,

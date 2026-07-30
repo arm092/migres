@@ -39,7 +39,7 @@ def _compose(*args, check=True):
 
 
 def _wait_mysql(host, port, user, password, database, timeout=120):
-    from mysql_client import MySQLClient
+    from migres.clients.mysql import MySQLClient
     cfg = {"host": host, "port": port, "user": user, "password": password, "database": database}
     start = time.time()
     last = None
@@ -57,7 +57,7 @@ def _wait_mysql(host, port, user, password, database, timeout=120):
 
 
 def _wait_ch(host, port, timeout=120):
-    from clickhouse_client import CHClient
+    from migres.clients.clickhouse import CHClient
     start = time.time()
     last = None
     while time.time() - start < timeout:
@@ -109,10 +109,10 @@ def e2e_stack():
 @pytest.mark.e2e
 @pytest.mark.slow
 def test_end_to_end_snapshot_and_cdc(e2e_stack):
-    from config import load_config
-    from mysql_client import MySQLClient
-    from clickhouse_client import CHClient
-    from buffer import BufferDB
+    from migres.config import load_config
+    from migres.clients.mysql import MySQLClient
+    from migres.clients.clickhouse import CHClient
+    from migres.buffer import BufferDB
 
     cfg = load_config(TEST_CONFIG)
     mysql = MySQLClient(cfg["mysql"])
