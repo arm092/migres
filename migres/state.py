@@ -18,7 +18,7 @@ class StateJson:
 
     @staticmethod
     def _default_state():
-        return {"binlog": None, "tables": {}}
+        return {"binlog": None, "gtid": None, "tables": {}}
 
     @staticmethod
     def _normalize_state(data):
@@ -26,6 +26,8 @@ class StateJson:
             return StateJson._default_state()
         if "binlog" not in data:
             data["binlog"] = None
+        if "gtid" not in data:
+            data["gtid"] = None
         if "tables" not in data or not isinstance(data.get("tables"), dict):
             data["tables"] = {}
         return data
@@ -72,6 +74,16 @@ class StateJson:
     def get_binlog(self):
         with self._lock:
             return self._load_unlocked().get("binlog")
+
+    def set_gtid(self, gtid):
+        with self._lock:
+            data = self._load_unlocked()
+            data["gtid"] = gtid
+            self._flush_unlocked(data)
+
+    def get_gtid(self):
+        with self._lock:
+            return self._load_unlocked().get("gtid")
 
     # table state helpers
     def get_table(self, table):

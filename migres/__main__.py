@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Thin CLI entrypoint — prefer `python -m migres`."""
 from migres.cli import main
 
 if __name__ == "__main__":

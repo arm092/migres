@@ -39,9 +39,16 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100
-    batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
+    # Legacy single knob (used as default for the three intervals below when they are unset)
+    batch_delay_seconds: 5
+    producer_flush_interval: 5      # Producer: flush binlog batch to buffer.db
+    transformer_poll_interval: 5    # Transformer: poll wait when below checkpoint_interval_rows
+    consumer_poll_interval: 5       # Consumer: sleep when prepared queue is empty / short batch
     batch_max_wait_seconds: 60
     producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
+    raw_events_max: 50000           # Backpressure: pause producer when raw_events >= this
+    raw_events_resume_ratio: 0.8    # Resume when raw_events <= max * ratio
+    use_gtid: false                 # When true, position via GTID (auto_position) instead of file:pos
     snapshot_before: true  # Run snapshot before CDC
     server_id: 4379  # Unique ID for binlog replication
     force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)

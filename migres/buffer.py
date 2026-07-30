@@ -112,6 +112,16 @@ class BufferDB:
                 failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoint (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                binlog_file TEXT,
+                binlog_pos INTEGER,
+                gtid TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         conn.commit()
 
@@ -121,7 +131,7 @@ class BufferDB:
             return None
         with self._debug_ch_lock:
             if self._debug_ch is None:
-                from clickhouse_client import CHClient
+                from migres.clients.clickhouse import CHClient
                 ch_cfg = self._cfg["clickhouse"]
                 mig_cfg = self._cfg.get("migration", {})
                 self._debug_ch = CHClient(ch_cfg, mig_cfg)
@@ -133,7 +143,7 @@ class BufferDB:
         ch = self._debug_ch
         if not ch:
             return
-        from schema_and_ddl import quote_ident
+        from migres.schema.ddl import quote_ident
         db = quote_ident(ch.db)
         ch.execute(f"""
             CREATE TABLE IF NOT EXISTS {db}.`debug_processed_events` (
@@ -306,29 +316,67 @@ class BufferDB:
             return row[0], row[1]
         return None, None
 
-    def insert_raw_events(self, events: List[Dict]):
-        """Bulk insert raw events"""
-        if not events:
-            return
-        
+    def get_checkpoint(self) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+        """Return (binlog_file, binlog_pos, gtid) from producer checkpoint table."""
         conn = self._get_conn()
         cursor = conn.cursor()
-        
-        data = []
-        for e in events:
-            data.append((
-                e['binlog_file'],
-                e['binlog_pos'],
-                e.get('schema'),
-                e.get('table'),
-                e.get('event_type'),
-                json.dumps(e.get('event_data', {})),
-            ))
-            
-        cursor.executemany("""
-            INSERT INTO raw_events (binlog_file, binlog_pos, schema_name, table_name, event_type, event_data)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, data)
+        cursor.execute("SELECT binlog_file, binlog_pos, gtid FROM checkpoint WHERE id = 1")
+        row = cursor.fetchone()
+        if not row:
+            return None, None, None
+        return row[0], row[1], row[2]
+
+    def insert_raw_events(
+        self,
+        events: List[Dict],
+        checkpoint_file: Optional[str] = None,
+        checkpoint_pos: Optional[int] = None,
+        gtid: Optional[str] = None,
+    ):
+        """Bulk insert raw events; optionally update checkpoint in the same transaction."""
+        if not events and checkpoint_file is None and gtid is None:
+            return
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            if events:
+                data = []
+                for e in events:
+                    data.append((
+                        e['binlog_file'],
+                        e['binlog_pos'],
+                        e.get('schema'),
+                        e.get('table'),
+                        e.get('event_type'),
+                        json.dumps(e.get('event_data', {})),
+                    ))
+                cursor.executemany("""
+                    INSERT INTO raw_events (binlog_file, binlog_pos, schema_name, table_name, event_type, event_data)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, data)
+
+            if events and checkpoint_file is None:
+                checkpoint_file = events[-1].get("binlog_file")
+                checkpoint_pos = events[-1].get("binlog_pos")
+            if checkpoint_file is not None or gtid is not None:
+                cursor.execute("""
+                    INSERT INTO checkpoint (id, binlog_file, binlog_pos, gtid, updated_at)
+                    VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(id) DO UPDATE SET
+                        binlog_file=COALESCE(excluded.binlog_file, checkpoint.binlog_file),
+                        binlog_pos=COALESCE(excluded.binlog_pos, checkpoint.binlog_pos),
+                        gtid=COALESCE(excluded.gtid, checkpoint.gtid),
+                        updated_at=CURRENT_TIMESTAMP
+                """, (checkpoint_file, checkpoint_pos, gtid))
+            cursor.execute("COMMIT")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
 
     def fetch_raw_events_batch(self, limit: int = 1000) -> List[Dict]:
         """Fetch oldest raw events for processing"""

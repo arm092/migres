@@ -12,7 +12,7 @@ import pytest
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from notifications import initialize_notifications, notify_cdc_error, notify_cdc_warning, notify_cdc_info
+from migres.notifications import initialize_notifications, notify_cdc_error, notify_cdc_warning, notify_cdc_info
 
 
 @pytest.fixture(scope="module")

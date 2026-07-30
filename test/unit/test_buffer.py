@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from buffer import BufferDB
+from migres.buffer import BufferDB
 
 
 pytestmark = pytest.mark.unit
@@ -154,6 +154,26 @@ def test_commit_prepared_queries_atomicity(buffer_db):
     assert len(remaining) == 1
     assert remaining[0]["id"] == new_id
     assert len(buffer_db.fetch_prepared_queries_batch(limit=1000)) == before_prepared
+
+
+def test_checkpoint_updated_with_insert(buffer_db):
+    assert buffer_db.get_checkpoint() == (None, None, None)
+    buffer_db.insert_raw_events(
+        [
+            {
+                "binlog_file": "mysql-bin.000003",
+                "binlog_pos": 500,
+                "schema": "db",
+                "table": "t",
+                "event_type": "write",
+                "event_data": {},
+            }
+        ]
+    )
+    file_name, pos, gtid = buffer_db.get_checkpoint()
+    assert file_name == "mysql-bin.000003"
+    assert pos == 500
+    assert gtid is None
 
 
 def test_move_to_failed(buffer_db):

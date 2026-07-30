@@ -2,7 +2,7 @@
 
 import pytest
 
-from schema_and_ddl import map_mysql_to_ch_type, map_with_low_cardinality
+from migres.schema.ddl import map_mysql_to_ch_type, map_with_low_cardinality
 
 
 pytestmark = pytest.mark.unit

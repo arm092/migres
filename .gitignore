@@ -9,3 +9,6 @@ test/.tmp
 .pytest_cache
 .coverage
 htmlcov
+*.egg-info
+dist
+build

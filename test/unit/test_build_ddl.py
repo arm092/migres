@@ -2,7 +2,7 @@
 
 import pytest
 
-from schema_and_ddl import build_table_ddl
+from migres.schema.ddl import build_table_ddl
 
 
 pytestmark = pytest.mark.unit

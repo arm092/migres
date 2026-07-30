@@ -2,11 +2,11 @@ import logging
 import threading
 import time
 
-from mysql_client import MySQLClient
-from clickhouse_client import CHClient
-from buffer import BufferDB
-from state_json import StateJson
-from schema_and_ddl import (
+from migres.clients.mysql import MySQLClient
+from migres.clients.clickhouse import CHClient
+from migres.buffer import BufferDB
+from migres.state import StateJson
+from migres.schema.ddl import (
     quote_ident,
     map_with_low_cardinality,
     binlog_position_key,
@@ -14,11 +14,7 @@ from schema_and_ddl import (
     parse_drop_table_names,
     parse_rename_table_pairs,
     parse_ddl_table_name,
-    DDL_CREATE_TABLE_PATTERN,
-    DDL_DROP_TABLE_PATTERN,
-    DDL_ALTER_TABLE_PATTERN,
-    DDL_TRUNCATE_TABLE_PATTERN,
-    DDL_RENAME_TABLE_PATTERN,
+    detect_ddl_kind,
     build_table_ddl,
     ensure_clickhouse_columns,
     _default_expr_for_column,
@@ -61,18 +57,7 @@ class PipelineTransformer:
         return f"{quote_ident(self.ch.db)}.{quote_ident(table)}"
 
     def _detect_ddl_kind(self, query: str):
-        cleaned = strip_sql_leading_comments(query)
-        if DDL_CREATE_TABLE_PATTERN.match(cleaned):
-            return "create"
-        if DDL_DROP_TABLE_PATTERN.match(cleaned):
-            return "drop"
-        if DDL_ALTER_TABLE_PATTERN.match(cleaned):
-            return "alter"
-        if DDL_TRUNCATE_TABLE_PATTERN.match(cleaned):
-            return "truncate"
-        if DDL_RENAME_TABLE_PATTERN.match(cleaned):
-            return "rename"
-        return None
+        return detect_ddl_kind(query)
 
     def _is_transaction_control(self, query: str) -> bool:
         cleaned = strip_sql_leading_comments(query).lower().strip()
@@ -496,7 +481,14 @@ class PipelineTransformer:
                                     time_since_last, batch_max_wait, raw_count,
                                 )
                             break
-                        wait_seconds = cdc_cfg.get("batch_delay_seconds", 5)
+                        if hasattr(cdc_cfg, "resolved_transformer_poll_interval"):
+                            wait_seconds = float(cdc_cfg.resolved_transformer_poll_interval())
+                        else:
+                            wait_seconds = float(
+                                cdc_cfg.get("transformer_poll_interval")
+                                or cdc_cfg.get("batch_delay_seconds", 5)
+                                or 0.5
+                            )
                         if wait_seconds <= 0:
                             wait_seconds = 0.5
                         if self.mig_cfg.get("debug"):

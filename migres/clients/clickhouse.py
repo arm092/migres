@@ -1,7 +1,7 @@
 import logging
 import threading
 from clickhouse_driver import Client
-from schema_and_ddl import quote_ident
+from migres.schema.ddl import quote_ident
 
 log = logging.getLogger(__name__)
 

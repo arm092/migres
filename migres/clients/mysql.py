@@ -1,7 +1,7 @@
 import mysql.connector
 import logging
 import threading
-from schema_and_ddl import quote_ident
+from migres.schema.ddl import quote_ident
 
 log = logging.getLogger(__name__)
 

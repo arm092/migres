@@ -13,4 +13,4 @@ RUN mkdir -p /app/data && touch /app/data/state.json
 COPY . .
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "migres.py", "--config", "/app/config.yml"]
+CMD ["python", "-m", "migres", "--config", "/app/config.yml"]

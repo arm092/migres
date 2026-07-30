@@ -5,8 +5,8 @@ from decimal import Decimal
 
 import pytest
 
-from pipeline_consumer import _convert_for_clickhouse
-from pipeline_producer import PipelineProducer
+from migres.consumer import _convert_for_clickhouse
+from migres.producer import PipelineProducer
 
 
 pytestmark = pytest.mark.unit

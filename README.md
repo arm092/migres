@@ -3,6 +3,8 @@
 This project is a **complete migration tool** that transfers tables from MySQL into ClickHouse with type mapping, logging, and resumable state.  
 It supports both **snapshot mode** (initial data migration) and **CDC mode** (real-time change data capture), with automatic schema synchronization.
 
+**Package:** installable as `migres` (`pyproject.toml`). Run with `python -m migres --config config.yml` or `python migres.py --config config.yml`.
+
 ---
 
 ## Features
@@ -81,7 +83,7 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 
 3. **Queue-based event processing**
    - Events are accumulated in a SQLite buffer database as they arrive from binlog
-   - Timer-based processing every `batch_delay_seconds` (configurable)
+   - Separate poll/flush intervals: `producer_flush_interval`, `transformer_poll_interval`, `consumer_poll_interval` (legacy `batch_delay_seconds` remains the default for unset knobs)
    - Continuous operation: keeps receiving events while processing queue
    - Events for tables not in `include_tables` are automatically filtered to prevent buffer accumulation
 
@@ -199,7 +201,12 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100 # Consumer batch size for execution
-    batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
+    batch_delay_seconds: 5  # Legacy default for the three intervals below
+    producer_flush_interval: 5
+    transformer_poll_interval: 5
+    consumer_poll_interval: 5
+    raw_events_max: 50000
+    use_gtid: false
     batch_max_wait_seconds: 60 # Max wait time for batch processing even if checkpoint_interval_rows is not reached
     producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
     force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)

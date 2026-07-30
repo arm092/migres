@@ -7,14 +7,15 @@ import time
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 
-from mysql_client import MySQLClient
-from state_json import StateJson
-from buffer import BufferDB
-from notifications import notify_cdc_error
 from pymysqlreplication import BinLogStreamReader
 from pymysqlreplication.row_event import WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent
 from pymysqlreplication.event import QueryEvent
-from schema_and_ddl import parse_ddl_table_name, strip_sql_leading_comments
+
+from migres.clients.mysql import MySQLClient
+from migres.state import StateJson
+from migres.buffer import BufferDB
+from migres.notifications import notify_cdc_error
+from migres.schema.ddl import parse_ddl_table_name, strip_sql_leading_comments
 
 log = logging.getLogger(__name__)
 
@@ -41,11 +42,37 @@ class PipelineProducer:
         pid = os.getpid()
         self.server_id = base_server_id + (pid % 1000)
         self.heartbeat_seconds = int(self.cdc_cfg.get("heartbeat_seconds", 5))
+        self.use_gtid = bool(self.cdc_cfg.get("use_gtid", False))
+        self.raw_events_max = int(self.cdc_cfg.get("raw_events_max", 50000) or 50000)
+        self.raw_events_resume = int(
+            self.raw_events_max * float(self.cdc_cfg.get("raw_events_resume_ratio", 0.8) or 0.8)
+        )
 
+        if hasattr(self.cdc_cfg, "resolved_producer_flush_interval"):
+            self.flush_interval = float(self.cdc_cfg.resolved_producer_flush_interval())
+        else:
+            self.flush_interval = float(self.cdc_cfg.get("producer_flush_interval")
+                                       or self.cdc_cfg.get("batch_delay_seconds", 5) or 0)
+
+        cp_file, cp_pos, cp_gtid = self.buffer.get_checkpoint()
         buf_file, buf_pos = self.buffer.get_last_committed_pos()
         state_binlog = self.state.get_binlog()
+        state_gtid = self.state.get_gtid()
 
-        if buf_file and buf_pos:
+        self.start_gtid = None
+        self.start_file = None
+        self.start_pos = None
+
+        if self.use_gtid:
+            self.start_gtid = cp_gtid or state_gtid
+            if self.mig_cfg.get("debug"):
+                log.info("Producer GTID mode; start_gtid=%s", self.start_gtid or "(current)")
+        elif cp_file and cp_pos is not None:
+            self.start_file = cp_file
+            self.start_pos = cp_pos
+            if self.mig_cfg.get("debug"):
+                log.info("Producer starting from checkpoint: %s:%s", self.start_file, self.start_pos)
+        elif buf_file and buf_pos is not None:
             self.start_file = buf_file
             self.start_pos = buf_pos
             if self.mig_cfg.get("debug"):
@@ -56,8 +83,6 @@ class PipelineProducer:
             if self.mig_cfg.get("debug"):
                 log.info("Producer starting from State file position: %s:%s", self.start_file, self.start_pos)
         else:
-            self.start_file = None
-            self.start_pos = None
             if self.mig_cfg.get("debug"):
                 log.info("Producer starting from current master position")
 
@@ -135,7 +160,7 @@ class PipelineProducer:
 
         return base
 
-    def _create_stream(self, log_file=None, log_pos=None):
+    def _create_stream(self, log_file=None, log_pos=None, gtid=None):
         only_schemas = [self.mysql_cfg["database"]]
         included = set(self.mysql_cfg.get("include_tables") or [])
         excluded = set(self.mysql_cfg.get("exclude_tables") or [])
@@ -162,9 +187,7 @@ class PipelineProducer:
                 "check_hostname": False,
             }
 
-        # Note: do not pass only_schemas/only_tables to the stream reader when values
-        # may be compared as bytes vs str; filter after decoding in run().
-        return BinLogStreamReader(
+        kwargs = dict(
             connection_settings=connection_settings,
             server_id=self.server_id,
             blocking=False,
@@ -173,13 +196,17 @@ class PipelineProducer:
             only_schemas=only_schemas,
             only_tables=only_tables,
             ignored_tables=ignored_tables,
-            log_file=log_file or self.start_file,
-            log_pos=log_pos or self.start_pos,
             slave_heartbeat=self.heartbeat_seconds,
-            # Ensure we skip events already at start_pos (avoid duplicates) while
-            # still receiving subsequent row events.
             skip_to_timestamp=None,
         )
+        if self.use_gtid:
+            # mysql-replication accepts GTID set string via auto_position
+            auto_pos = gtid if gtid is not None else self.start_gtid
+            kwargs["auto_position"] = auto_pos if auto_pos else True
+        else:
+            kwargs["log_file"] = log_file or self.start_file
+            kwargs["log_pos"] = log_pos or self.start_pos
+        return BinLogStreamReader(**kwargs)
 
     def _should_skip_query_event(self, event):
         query = event.query or ""
@@ -196,6 +223,43 @@ class PipelineProducer:
                 return True
         return False
 
+    def _wait_for_backpressure(self):
+        """Pause binlog reading when raw_events is above the configured limit."""
+        if self.raw_events_max <= 0:
+            return
+        while not self._shutdown_flag.is_set():
+            stats = self.buffer.get_queue_stats()
+            raw_count = stats.get("raw_events", 0)
+            if raw_count < self.raw_events_max:
+                return
+            log.warning(
+                "Backpressure: raw_events=%d >= %d; pausing producer until below %d",
+                raw_count, self.raw_events_max, self.raw_events_resume,
+            )
+            while not self._shutdown_flag.is_set():
+                time.sleep(0.5)
+                raw_count = self.buffer.get_queue_stats().get("raw_events", 0)
+                if raw_count <= self.raw_events_resume:
+                    log.info("Backpressure cleared: raw_events=%d", raw_count)
+                    return
+
+    def _flush_batch(self, batch, current_file, current_pos, current_gtid=None):
+        if not batch:
+            return
+        self.buffer.insert_raw_events(
+            batch,
+            checkpoint_file=current_file,
+            checkpoint_pos=current_pos,
+            gtid=current_gtid,
+        )
+        if current_gtid:
+            self.state.set_gtid(current_gtid)
+        if self.mig_cfg.get("debug"):
+            log.info(
+                "Producer committed %d events up to %s:%s gtid=%s",
+                len(batch), current_file, current_pos, current_gtid,
+            )
+
     def run(self):
         if self.mig_cfg.get("debug"):
             log.info("Starting Pipeline Producer...")
@@ -211,9 +275,10 @@ class PipelineProducer:
         stream = self._create_stream()
         current_file = self.start_file
         current_pos = self.start_pos
+        current_gtid = self.start_gtid
 
         batch_size = self.cdc_cfg.get("producer_batch_size", 100)
-        flush_interval = self.cdc_cfg.get("batch_delay_seconds", 5)
+        flush_interval = self.flush_interval
         batch = []
         last_flush_time = time.time()
         consecutive_errors = 0
@@ -221,6 +286,10 @@ class PipelineProducer:
 
         try:
             while not self._shutdown_flag.is_set():
+                self._wait_for_backpressure()
+                if self._shutdown_flag.is_set():
+                    break
+
                 try:
                     event = stream.fetchone()
                     consecutive_errors = 0
@@ -232,9 +301,7 @@ class PipelineProducer:
 
                     if batch:
                         try:
-                            self.buffer.insert_raw_events(batch)
-                            if self.mig_cfg.get("debug"):
-                                log.info("Producer flushed %d events before reconnect", len(batch))
+                            self._flush_batch(batch, current_file, current_pos, current_gtid)
                             batch = []
                         except Exception as flush_err:
                             log.warning("Failed to flush batch before reconnect: %s", flush_err)
@@ -252,16 +319,14 @@ class PipelineProducer:
                         pass
 
                     time.sleep(1)
-                    stream = self._create_stream(current_file, current_pos)
+                    stream = self._create_stream(current_file, current_pos, current_gtid)
                     last_flush_time = time.time()
                     continue
 
                 if event is None:
                     now = time.time()
-                    if batch and (now - last_flush_time >= flush_interval):
-                        self.buffer.insert_raw_events(batch)
-                        if self.mig_cfg.get("debug"):
-                            log.info("Producer flushed %d events (time-based)", len(batch))
+                    if batch and (flush_interval <= 0 or (now - last_flush_time >= flush_interval)):
+                        self._flush_batch(batch, current_file, current_pos, current_gtid)
                         batch = []
                         last_flush_time = now
                     time.sleep(0.1)
@@ -278,6 +343,8 @@ class PipelineProducer:
 
                 current_file = stream.log_file
                 current_pos = stream.log_pos
+                if hasattr(stream, "gtid") and stream.gtid:
+                    current_gtid = stream.gtid
 
                 item = {
                     "binlog_file": current_file,
@@ -296,14 +363,12 @@ class PipelineProducer:
                 batch.append(item)
 
                 now = time.time()
-                should_flush = len(batch) >= batch_size or (now - last_flush_time >= flush_interval and batch)
+                should_flush = (
+                    len(batch) >= batch_size
+                    or (batch and (flush_interval <= 0 or (now - last_flush_time >= flush_interval)))
+                )
                 if should_flush:
-                    self.buffer.insert_raw_events(batch)
-                    if self.mig_cfg.get("debug"):
-                        log.info(
-                            "Producer committed %d events up to %s:%s",
-                            len(batch), current_file, current_pos,
-                        )
+                    self._flush_batch(batch, current_file, current_pos, current_gtid)
                     batch = []
                     last_flush_time = now
 
@@ -315,7 +380,7 @@ class PipelineProducer:
             if batch:
                 try:
                     log.info("Producer flushing %d pending events before shutdown", len(batch))
-                    self.buffer.insert_raw_events(batch)
+                    self._flush_batch(batch, current_file, current_pos, current_gtid)
                     log.info("Producer flushed pending events successfully")
                 except Exception as flush_err:
                     log.error("Failed to flush pending batch during shutdown: %s", flush_err)

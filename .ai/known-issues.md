@@ -47,8 +47,10 @@ Producer calls `assert_cdc_binlog_settings()` at startup; refuses CDC unless `bi
 ### 🟠 BUG-5: DDL vs data reordering within a batch — **FIXED**
 Transformer flushes pending data events before inline CREATE/ALTER DDL in binlog order.
 
-### 🟠 BUG-6: Duplicate events on producer restart — **FIXED (documented)**
-At-least-once semantics retained; ReplacingMergeTree deduplicates. Dedicated producer checkpoint deferred.
+### 🟠 BUG-6: Duplicate events on producer restart — **FIXED (upgrade)**
+Producer writes a `checkpoint` row in the same SQLite transaction as each `raw_events` flush.
+Resume order: checkpoint → last raw_events row → `state.json` (manual override). At-least-once
+still possible across crash windows; ReplacingMergeTree deduplicates.
 
 ### 🟠 BUG-7: Binlog file names compared lexicographically — **FIXED**
 `binlog_position_key()` in `schema_and_ddl.py` compares `(basename, numeric_suffix, pos)` tuples.

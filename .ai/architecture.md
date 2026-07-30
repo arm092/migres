@@ -10,9 +10,12 @@ MySQL  ────────────────────────�
   │ binlog (ROW format)                cdc mode
   ▼
 PipelineProducer ──► SQLite buffer.db ──► PipelineTransformer ──► SQLite buffer.db ──► PipelineConsumer ──► ClickHouse
- (binlog reader)      raw_events           (SQL generation,        prepared_queries      (query executor)
-                                            DDL handling)
+ (binlog reader)      raw_events +         (SQL generation,        prepared_queries      (per-table workers)
+                      checkpoint            DDL via sqlglot/regex)
 ```
+
+Package layout: `migres/` (`producer`, `transformer`, `consumer`, `clients/`, `schema/`, `cli.py`).
+Entry: `python -m migres` or root `migres.py`. Typed config: `migres.config.MigresConfig`.
 
 Both modes may run in one process: with `migration.cdc.snapshot_before: true` the CDC mode first
 runs a full snapshot, then starts the pipeline. The binlog position is recorded in `state.json`
@@ -21,14 +24,14 @@ deduplicated by `ReplacingMergeTree`.
 
 ## Process / thread model (CDC mode)
 
-`migres.py:run_cdc_pipeline()` starts three daemon threads and then loops forever in the main
-thread as a watchdog:
+`migres.cli:run_cdc_pipeline()` starts three non-daemon threads and then loops forever in the main
+thread as a watchdog (SIGTERM triggers graceful flush + join):
 
 | Thread | Class | Role |
 |--------|-------|------|
-| Producer | `pipeline_producer.PipelineProducer` | Reads binlog events via `BinLogStreamReader` (non-blocking), serializes them to JSON, batches them (`producer_batch_size` / `batch_delay_seconds`), inserts into `raw_events` |
-| Transformer | `pipeline_transformer.PipelineTransformer` | Fetches `raw_events` batches, executes DDL against ClickHouse immediately (with retries), groups data events per table, generates one multi-row `INSERT` per table group, atomically writes to `prepared_queries` and deletes processed `raw_events`, updates `state.json` binlog position |
-| Consumer | `pipeline_consumer.PipelineConsumer` | Fetches `prepared_queries` batches, converts params to ClickHouse types (dates/datetimes/decimals by column type via `DESCRIBE TABLE`), executes inserts/DDL, deletes processed queries; moves permanent failures to `failed_queries` |
+| Producer | `migres.producer.PipelineProducer` | Reads binlog (`file:pos` or optional GTID), batches with `producer_flush_interval`, writes `raw_events` + `checkpoint` atomically; pauses on `raw_events_max` backpressure |
+| Transformer | `migres.transformer.PipelineTransformer` | Fetches `raw_events`, handles DDL (sqlglot with regex fallback), groups DML, writes `prepared_queries`, updates `state.json` |
+| Consumer | `migres.consumer.PipelineConsumer` | Per-table worker threads (order preserved within a table); DDL drains workers then runs serially; permanent failures → `failed_queries` |
 
 Watchdog behavior in the main loop:
 - Processes `_signal_flags` (SIGUSR1 reset / SIGUSR2 reposition) before thread checks — handlers only set events; heavy work runs in the main thread.
@@ -43,8 +46,9 @@ Each stage owns its **own** `BufferDB` instance; SQLite concurrency is handled w
 
 ## Delivery semantics
 
-- Producer → buffer: at-least-once. On reconnect it resumes from the last position stored in
-  `raw_events` (or `state.json` as fallback), so duplicate raw events are possible.
+- Producer → buffer: at-least-once. On reconnect it resumes from the `checkpoint` table
+  (updated in the same transaction as each flush), then last `raw_events` row, then
+  `state.json` (manual override). Optional GTID via `migration.cdc.use_gtid`.
 - Transformer commit is atomic in SQLite: inserting `prepared_queries` + deleting consumed
   `raw_events` happens in one transaction.
 - Consumer deletes a query only after successful execution → a crash between execute and delete
