@@ -7,7 +7,12 @@ name = "migres"
 version = "3.0.0"
 description = "MySQL to ClickHouse CDC pipeline"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+authors = [
+  {name = "Arman Khachatryan", email = "arman.khachatryan.dev@gmail.com"},
+]
+urls = {Homepage = "https://github.com/arm092/migres", Issues = "https://github.com/arm092/migres/issues"}
 dependencies = [
   "clickhouse-driver==0.2.9",
   "mysql-connector-python==9.3.0",

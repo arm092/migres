@@ -5,6 +5,8 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 
 **Package:** installable as `migres` (`pyproject.toml`). Run with `python -m migres --config config.yml` or `python migres.py --config config.yml`.
 
+**License:** [MIT](LICENSE)
+
 ---
 
 ## Features
@@ -36,8 +38,10 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
   - ✅ MODIFY COLUMN (type changes, defaults)
 - 📊 **ReplacingMergeTree** for upsert semantics
 - 🎯 **Table filtering** (include/exclude) - events for excluded tables are automatically skipped
-- 💾 **Checkpoint persistence** (resume from last committed position)
+- 💾 **Checkpoint persistence** in `buffer.db` (resume from last committed binlog position)
 - 🔒 **Unique server_id per process** (PID-based) prevents MySQL replication conflicts
+- 🧭 **Optional GTID** positioning (`use_gtid`) for master failover
+- 🛑 **Backpressure** when `raw_events` grows past `raw_events_max`
 - 🌍 **Timezone-aware datetime handling** (DateTime64 with timezone)
 - 🛡️ **Robust error handling** — permanent data/type errors move queries to `failed_queries`; transient network errors crash the consumer for orchestrator restart/retry
 - 📱 **MS Teams notifications** for errors, warnings, and important events
@@ -116,19 +120,38 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
    - `failed_queries` stores timestamp, error reason, SQL, and params for manual review/recovery
 
 8. **Checkpoint persistence**
-   - Saves binlog position periodically to buffer database
-   - Resumes from last committed position on restart
-   - State persisted in both buffer database and `state.json` file
-   - By default, producer prioritizes buffer DB position over state.json
+   - Producer writes the last committed binlog position to the `checkpoint` table in `buffer.db` (atomically with each flush)
+   - On restart the producer resumes from: `checkpoint` → `force_binlog_position` → `state.json` → current master
+   - `state.json` is the snapshot baseline and a **manual override** (reset / SIGUSR2), not the live CDC cursor
    - Set `db_debug: true` to archive processed events/queries in `raw_events_processed` and `prepared_queries_processed` tables for debugging
 
 ---
 
 ## Requirements
 
+- **Python** 3.10+
 - **MySQL** server (with data to migrate)
 - **ClickHouse** server (can be remote)
-- **Docker + Docker Compose**
+- **Docker + Docker Compose** (optional; for containerized runs and e2e tests)
+
+---
+
+## Upgrading to 3.0.0
+
+3.0.0 is a **breaking** config change. The single `batch_delay_seconds` knob (and `CDC_BATCH_DELAY_SECONDS`) is removed. Each pipeline stage now has its own interval with explicit defaults:
+
+| Stage | Config key | Env var | Default |
+|-------|------------|---------|---------|
+| Producer flush | `producer_flush_interval` | `CDC_PRODUCER_FLUSH_INTERVAL` | `5` |
+| Transformer poll | `transformer_poll_interval` | `CDC_TRANSFORMER_POLL_INTERVAL` | `0.5` |
+| Consumer poll | `consumer_poll_interval` | `CDC_CONSUMER_POLL_INTERVAL` | `0.5` |
+
+If `batch_delay_seconds` or `CDC_BATCH_DELAY_SECONDS` is still present, it is **ignored** and a warning is logged. Copy the values into the three keys above (see `config.yml.example`). Full notes: [CHANGELOG.md](CHANGELOG.md).
+
+Other 3.0.0 notes:
+- Installable package: `python -m migres` (or `python migres.py`)
+- Producer resume position lives in the `checkpoint` table in `buffer.db`; `state.json` is snapshot baseline / manual override
+- Optional GTID (`use_gtid`) and producer backpressure (`raw_events_max`)
 
 ---
 
@@ -204,8 +227,9 @@ migration:
     producer_flush_interval: 5      # Producer: flush binlog batch to buffer (seconds)
     transformer_poll_interval: 0.5  # Transformer: poll wait when below checkpoint_interval_rows
     consumer_poll_interval: 0.5     # Consumer: sleep when queue is empty / batch not full
-    raw_events_max: 50000
-    use_gtid: false
+    raw_events_max: 50000           # Backpressure: pause producer when raw_events >= this
+    raw_events_resume_ratio: 0.8    # Resume when raw_events <= max * ratio
+    use_gtid: false                 # When true, position via GTID instead of file:pos
     batch_max_wait_seconds: 60 # Max wait time for batch processing even if checkpoint_interval_rows is not reached
     producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
     force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)
@@ -383,6 +407,11 @@ export CLICKHOUSE_PASSWORD=your-password
 # Migration configuration
 export MIGRATION_DEBUG=true
 
+# CDC intervals (3.0.0+; CDC_BATCH_DELAY_SECONDS is removed)
+export CDC_PRODUCER_FLUSH_INTERVAL=5
+export CDC_TRANSFORMER_POLL_INTERVAL=0.5
+export CDC_CONSUMER_POLL_INTERVAL=0.5
+
 # Local paths
 export STATE_FILE=/app/data/state.json
 export BUFFER_FILE=/app/data/buffer.db
@@ -474,7 +503,7 @@ Timestamp: 2025-01-24 10:30:00 UTC
 Details:
 - MySQL: localhost:3306/mydb
 - ClickHouse: localhost:9000/mydb
-- Batch Delay: 5s
+- Flush Interval: 5s
 - Mode: CDC
 ```
 
@@ -599,7 +628,7 @@ docker compose up
   - `30+` = for high-volume, less time-sensitive scenarios
 ### CDC Batching Configuration
 
-Each pipeline stage has its own interval (the single `batch_delay_seconds` knob was removed in 3.0.0):
+Each pipeline stage has its own interval. The old `batch_delay_seconds` / `CDC_BATCH_DELAY_SECONDS` knob was **removed in 3.0.0** and is ignored if still present:
 
 **Immediate Processing:**
 ```yaml
@@ -648,3 +677,9 @@ Result: 1 ClickHouse INSERT with 100 rows
 MySQL: 50 UPDATEs for 'users' + 30 INSERTs for 'orders'
 Result: 2 ClickHouse INSERTs (1 with 50 rows, 1 with 30 rows)
 ```
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Arman Khachatryan
