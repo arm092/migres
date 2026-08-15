@@ -5,11 +5,9 @@ import time
 from migres.clients.mysql import MySQLClient
 from migres.clients.clickhouse import CHClient
 from migres.buffer import BufferDB
-from migres.state import StateJson
 from migres.schema.ddl import (
     quote_ident,
     map_with_low_cardinality,
-    binlog_position_key,
     strip_sql_leading_comments,
     parse_drop_table_names,
     parse_rename_table_pairs,
@@ -35,7 +33,6 @@ class PipelineTransformer:
         cdc_cfg = self.mig_cfg.get("cdc", {})
         db_debug = cdc_cfg.get("db_debug", False)
         self.buffer = BufferDB(db_debug=db_debug, cfg=cfg)
-        self.state = StateJson(cfg.get("state_file"))
         self.mysql_client = MySQLClient(cfg["mysql"])
         self.ch = CHClient(cfg["clickhouse"], self.mig_cfg)
         self._last_commit_ns = 0
@@ -435,25 +432,6 @@ class PipelineTransformer:
             else:
                 processed_event_ids.extend(group["event_ids"])
 
-    def _max_binlog_from_events(self, raw_events, event_ids):
-        id_set = set(event_ids)
-        max_key = None
-        max_file = None
-        max_pos = None
-        for event in raw_events:
-            if event["id"] not in id_set:
-                continue
-            event_file = event.get("binlog_file")
-            event_pos = event.get("binlog_pos")
-            if not event_file or event_pos is None:
-                continue
-            key = binlog_position_key(event_file, event_pos)
-            if max_key is None or key > max_key:
-                max_key = key
-                max_file = event_file
-                max_pos = event_pos
-        return max_file, max_pos
-
     def run(self):
         if self.mig_cfg.get("debug"):
             log.info("Starting Pipeline Transformer...")
@@ -578,15 +556,6 @@ class PipelineTransformer:
                             "Transformer: %d events -> %d prepared queries (%d rows), skipped=%d",
                             len(events_to_commit), len(prepared_queries), total_rows, len(skipped_event_ids),
                         )
-
-                    max_binlog_file, max_binlog_pos = self._max_binlog_from_events(raw_events, events_to_commit)
-                    if max_binlog_file and max_binlog_pos is not None:
-                        self.state.set_binlog(max_binlog_file, max_binlog_pos)
-                        if self.mig_cfg.get("debug"):
-                            log.info(
-                                "Transformer: Updated state.json binlog position to %s:%s",
-                                max_binlog_file, max_binlog_pos,
-                            )
 
             except Exception as e:
                 log.exception("Pipeline Transformer failed: %s", e)
