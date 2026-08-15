@@ -55,6 +55,7 @@ CDC_USE_GTID=false
 CDC_RAW_EVENTS_MAX=50000
 ```
 **Notes:**
+- `CDC_BATCH_DELAY_SECONDS` was **removed in 3.0.0**. Use `CDC_PRODUCER_FLUSH_INTERVAL`, `CDC_TRANSFORMER_POLL_INTERVAL`, and `CDC_CONSUMER_POLL_INTERVAL`. The old variable is ignored with a warning.
 - `CDC_FORCE_BINLOG_POSITION` - Optional binlog position in "file:position" format (e.g., "mysql-bin.000123:6855245"). Used by SIGUSR2 reposition handler to set a specific binlog position. If not set, SIGUSR2 signal is ignored. Default is not set (null).
 - `CDC_DB_DEBUG` - If set to `true`, processed events and queries are archived to ClickHouse debug tables instead of being deleted. Useful for debugging and auditing. Default is `false`.
 
