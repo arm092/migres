@@ -30,7 +30,7 @@ thread as a watchdog (SIGTERM triggers graceful flush + join):
 | Thread | Class | Role |
 |--------|-------|------|
 | Producer | `migres.producer.PipelineProducer` | Reads binlog (`file:pos` or optional GTID), batches with `producer_flush_interval`, writes `raw_events` + `checkpoint` atomically; pauses on `raw_events_max` backpressure |
-| Transformer | `migres.transformer.PipelineTransformer` | Fetches `raw_events`, handles DDL (sqlglot with regex fallback), groups DML, writes `prepared_queries`, updates `state.json` |
+| Transformer | `migres.transformer.PipelineTransformer` | Fetches `raw_events`, handles DDL (sqlglot with regex fallback), groups DML, writes `prepared_queries` |
 | Consumer | `migres.consumer.PipelineConsumer` | Per-table worker threads (order preserved within a table); DDL drains workers then runs serially; permanent failures → `failed_queries` |
 
 Watchdog behavior in the main loop:
@@ -64,12 +64,13 @@ Each stage owns its **own** `BufferDB` instance; SQLite concurrency is handled w
 ## Binlog position management
 
 Priority when the Producer starts (`PipelineProducer.__init__`):
-1. Last row in `raw_events` (`buffer.get_last_committed_pos()`)
-2. `state.json` `binlog` entry
-3. Current master position (stream starts from "now")
+1. `checkpoint` row in `buffer.db` (updated atomically with each producer flush)
+2. Last row in `raw_events` (`buffer.get_last_committed_pos()`)
+3. `state.json` `binlog` entry (manual override / snapshot baseline)
+4. Current master position (stream starts from "now")
 
-The Transformer advances `state.json` to the max position of each processed batch using
-`binlog_position_key()` (numeric suffix comparison, not plain string compare).
+`state.json` binlog is written by **snapshot** (start position before copy) and **manual ops**
+(SIGUSR2 / `force_binlog_position`). The Transformer does not update it.
 
 ## DDL handling (Transformer)
 
