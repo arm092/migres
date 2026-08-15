@@ -81,3 +81,28 @@ def test_poll_interval_defaults(config_path, monkeypatch):
     assert "batch_delay_seconds" not in cdc
     assert cdc.get("use_gtid") is False
     assert cdc.get("raw_events_max") == 50000
+
+
+def test_legacy_webhook_url_maps_to_teams(config_path, monkeypatch):
+    monkeypatch.delenv("NOTIFICATIONS_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("NOTIFICATIONS_TEAMS_WEBHOOK_URL", raising=False)
+    with open(config_path, "a", encoding="utf-8") as f:
+        f.write(
+            "\nnotifications:\n  enabled: true\n"
+            "  webhook_url: https://example.webhook.office.com/abc\n"
+        )
+    cfg = load_config(config_path)
+    assert cfg.notifications.webhook_url.endswith("/abc")
+    assert cfg.notifications.teams.webhook_url.endswith("/abc")
+
+
+def test_notification_env_overrides(config_path, monkeypatch):
+    monkeypatch.setenv("NOTIFICATIONS_ENABLED", "true")
+    monkeypatch.setenv("NOTIFICATIONS_SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/X")
+    monkeypatch.setenv("NOTIFICATIONS_TELEGRAM_BOT_TOKEN", "123:secret")
+    monkeypatch.setenv("NOTIFICATIONS_TELEGRAM_CHAT_ID", "-1001")
+    cfg = load_config(config_path)
+    assert cfg.notifications.enabled is True
+    assert cfg.notifications.slack.webhook_url.endswith("/X")
+    assert cfg.notifications.telegram.bot_token == "123:secret"
+    assert cfg.notifications.telegram.chat_id == "-1001"

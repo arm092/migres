@@ -102,10 +102,32 @@ class MigrationConfig(_MapMixin):
 
 
 @dataclass
+class TeamsNotificationsConfig(_MapMixin):
+    enabled: bool = True
+    webhook_url: str = ""
+
+
+@dataclass
+class SlackNotificationsConfig(_MapMixin):
+    enabled: bool = True
+    webhook_url: str = ""
+
+
+@dataclass
+class TelegramNotificationsConfig(_MapMixin):
+    enabled: bool = True
+    bot_token: str = ""
+    chat_id: str = ""
+
+
+@dataclass
 class NotificationsConfig(_MapMixin):
     enabled: bool = False
-    webhook_url: str = ""
+    webhook_url: str = ""  # legacy Teams alias
     rate_limit_seconds: int = 60
+    teams: TeamsNotificationsConfig = field(default_factory=TeamsNotificationsConfig)
+    slack: SlackNotificationsConfig = field(default_factory=SlackNotificationsConfig)
+    telegram: TelegramNotificationsConfig = field(default_factory=TelegramNotificationsConfig)
 
 
 @dataclass
@@ -230,7 +252,6 @@ def _apply_env_overrides(cfg: MigresConfig) -> MigresConfig:
 
     notif_map = {
         "NOTIFICATIONS_ENABLED": ("enabled", bool),
-        "NOTIFICATIONS_WEBHOOK_URL": ("webhook_url", str),
         "NOTIFICATIONS_RATE_LIMIT_SECONDS": ("rate_limit_seconds", int),
     }
     for env_var, (key, typ) in notif_map.items():
@@ -244,6 +265,21 @@ def _apply_env_overrides(cfg: MigresConfig) -> MigresConfig:
             continue
         setattr(cfg.notifications, key, val)
         log.info("Override: notifications.%s = %s", key, val)
+
+    teams_url = os.environ.get("NOTIFICATIONS_TEAMS_WEBHOOK_URL") or os.environ.get("NOTIFICATIONS_WEBHOOK_URL")
+    if teams_url:
+        cfg.notifications.teams.webhook_url = teams_url
+        cfg.notifications.webhook_url = teams_url
+        log.info("Override: notifications.teams.webhook_url = ***")
+    if "NOTIFICATIONS_SLACK_WEBHOOK_URL" in os.environ:
+        cfg.notifications.slack.webhook_url = os.environ["NOTIFICATIONS_SLACK_WEBHOOK_URL"]
+        log.info("Override: notifications.slack.webhook_url = ***")
+    if "NOTIFICATIONS_TELEGRAM_BOT_TOKEN" in os.environ:
+        cfg.notifications.telegram.bot_token = os.environ["NOTIFICATIONS_TELEGRAM_BOT_TOKEN"]
+        log.info("Override: notifications.telegram.bot_token = ***")
+    if "NOTIFICATIONS_TELEGRAM_CHAT_ID" in os.environ:
+        cfg.notifications.telegram.chat_id = os.environ["NOTIFICATIONS_TELEGRAM_CHAT_ID"]
+        log.info("Override: notifications.telegram.chat_id = %s", cfg.notifications.telegram.chat_id)
 
     if "STATE_FILE" in os.environ:
         cfg.state_file = os.environ["STATE_FILE"]
@@ -286,11 +322,29 @@ def load_config(path: str) -> MigresConfig:
             raw.get("migration"),
             nested={"cdc": CdcConfig},
         ),
-        notifications=_merge_dataclass(NotificationsConfig, raw.get("notifications")),
+        notifications=_merge_dataclass(
+            NotificationsConfig,
+            raw.get("notifications"),
+            nested={
+                "teams": TeamsNotificationsConfig,
+                "slack": SlackNotificationsConfig,
+                "telegram": TelegramNotificationsConfig,
+            },
+        ),
         state_file=raw.get("state_file") or "/app/state.json",
         buffer_file=raw.get("buffer_file") or "data/buffer.db",
         environment=raw.get("environment") or "prod",
     )
     if cfg.mysql.include_tables is None:
         cfg.mysql.include_tables = []
+    _normalize_notifications(cfg)
     return _apply_env_overrides(cfg)
+
+
+def _normalize_notifications(cfg: MigresConfig) -> None:
+    """Flat webhook_url is the Teams alias used by existing configs."""
+    n = cfg.notifications
+    if n.webhook_url and not n.teams.webhook_url:
+        n.teams.webhook_url = n.webhook_url
+    elif n.teams.webhook_url and not n.webhook_url:
+        n.webhook_url = n.teams.webhook_url

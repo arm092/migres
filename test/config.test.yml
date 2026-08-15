@@ -46,5 +46,14 @@ environment: test
 
 notifications:
   enabled: false
-  webhook_url: ""
   rate_limit_seconds: 0
+  teams:
+    enabled: false
+    webhook_url: ""
+  slack:
+    enabled: false
+    webhook_url: ""
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
