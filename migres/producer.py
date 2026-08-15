@@ -48,11 +48,7 @@ class PipelineProducer:
             self.raw_events_max * float(self.cdc_cfg.get("raw_events_resume_ratio", 0.8) or 0.8)
         )
 
-        if hasattr(self.cdc_cfg, "resolved_producer_flush_interval"):
-            self.flush_interval = float(self.cdc_cfg.resolved_producer_flush_interval())
-        else:
-            self.flush_interval = float(self.cdc_cfg.get("producer_flush_interval")
-                                       or self.cdc_cfg.get("batch_delay_seconds", 5) or 0)
+        self.flush_interval = float(self.cdc_cfg.get("producer_flush_interval", 5.0))
 
         cp_file, cp_pos, cp_gtid = self.buffer.get_checkpoint()
         buf_file, buf_pos = self.buffer.get_last_committed_pos()

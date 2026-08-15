@@ -74,12 +74,11 @@ class CdcConfig(_MapMixin):
     heartbeat_seconds: int = 5
     checkpoint_interval_rows: int = 5000
     prepared_queries_batch_limit: int = 100
-    batch_delay_seconds: int = 0
     batch_max_wait_seconds: int = 60
     producer_batch_size: int = 100
-    producer_flush_interval: Optional[float] = None
-    transformer_poll_interval: Optional[float] = None
-    consumer_poll_interval: Optional[float] = None
+    producer_flush_interval: float = 5.0
+    transformer_poll_interval: float = 0.5
+    consumer_poll_interval: float = 0.5
     snapshot_before: bool = True
     server_id: int = 4379
     force_binlog_position: Optional[str] = None
@@ -87,23 +86,6 @@ class CdcConfig(_MapMixin):
     use_gtid: bool = False
     raw_events_max: int = 50000
     raw_events_resume_ratio: float = 0.8
-
-    def resolved_producer_flush_interval(self) -> float:
-        if self.producer_flush_interval is not None:
-            return float(self.producer_flush_interval)
-        return float(self.batch_delay_seconds)
-
-    def resolved_transformer_poll_interval(self) -> float:
-        if self.transformer_poll_interval is not None:
-            return float(self.transformer_poll_interval)
-        v = float(self.batch_delay_seconds)
-        return v if v > 0 else 0.5
-
-    def resolved_consumer_poll_interval(self) -> float:
-        if self.consumer_poll_interval is not None:
-            return float(self.consumer_poll_interval)
-        v = float(self.batch_delay_seconds)
-        return v if v > 0 else 0.1
 
 
 @dataclass
@@ -216,7 +198,6 @@ def _apply_env_overrides(cfg: MigresConfig) -> MigresConfig:
         log.info("Override: migration.%s = %s", key, val)
 
     cdc_map = {
-        "CDC_BATCH_DELAY_SECONDS": ("batch_delay_seconds", int),
         "CDC_HEARTBEAT_SECONDS": ("heartbeat_seconds", int),
         "CDC_CHECKPOINT_INTERVAL_ROWS": ("checkpoint_interval_rows", int),
         "CDC_BATCH_MAX_WAIT_SECONDS": ("batch_max_wait_seconds", int),
@@ -277,10 +258,26 @@ def _apply_env_overrides(cfg: MigresConfig) -> MigresConfig:
     return cfg
 
 
+def _warn_removed_keys(raw: Dict[str, Any]) -> None:
+    """Warn about config keys removed in 3.0.0 (they are ignored, not honored)."""
+    cdc_raw = (raw.get("migration") or {}).get("cdc") or {}
+    if "batch_delay_seconds" in cdc_raw:
+        log.warning(
+            "migration.cdc.batch_delay_seconds was removed in 3.0.0 and is ignored; "
+            "use producer_flush_interval / transformer_poll_interval / consumer_poll_interval"
+        )
+    if "CDC_BATCH_DELAY_SECONDS" in os.environ:
+        log.warning(
+            "CDC_BATCH_DELAY_SECONDS was removed in 3.0.0 and is ignored; "
+            "use CDC_PRODUCER_FLUSH_INTERVAL / CDC_TRANSFORMER_POLL_INTERVAL / CDC_CONSUMER_POLL_INTERVAL"
+        )
+
+
 def load_config(path: str) -> MigresConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
+    _warn_removed_keys(raw)
     cfg = MigresConfig(
         mysql=_merge_dataclass(MySQLConfig, raw.get("mysql")),
         clickhouse=_merge_dataclass(ClickHouseConfig, raw.get("clickhouse")),

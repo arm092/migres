@@ -459,14 +459,7 @@ class PipelineTransformer:
                                     time_since_last, batch_max_wait, raw_count,
                                 )
                             break
-                        if hasattr(cdc_cfg, "resolved_transformer_poll_interval"):
-                            wait_seconds = float(cdc_cfg.resolved_transformer_poll_interval())
-                        else:
-                            wait_seconds = float(
-                                cdc_cfg.get("transformer_poll_interval")
-                                or cdc_cfg.get("batch_delay_seconds", 5)
-                                or 0.5
-                            )
+                        wait_seconds = float(cdc_cfg.get("transformer_poll_interval", 0.5))
                         if wait_seconds <= 0:
                             wait_seconds = 0.5
                         if self.mig_cfg.get("debug"):

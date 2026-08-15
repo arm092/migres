@@ -122,14 +122,7 @@ class PipelineConsumer:
         self._table_state_lock = threading.Lock()
         self._fatal_error = None
 
-        if hasattr(cdc_cfg, "resolved_consumer_poll_interval"):
-            self.poll_interval = float(cdc_cfg.resolved_consumer_poll_interval())
-        else:
-            self.poll_interval = float(
-                cdc_cfg.get("consumer_poll_interval")
-                or cdc_cfg.get("batch_delay_seconds", 5)
-                or 0.1
-            )
+        self.poll_interval = float(cdc_cfg.get("consumer_poll_interval", 0.5))
 
     def _ch_table_ref(self, table: str) -> str:
         if "." in table:
