@@ -2,6 +2,7 @@
 data
 config.yml
 .idea
+.ai
 __pycache__
 test/__pycache__
 test/.tmp
