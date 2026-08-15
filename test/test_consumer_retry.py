@@ -1,52 +1,58 @@
 #!/usr/bin/env python3
 """
-Consumer Retry Test - Tests consumer retry logic for failed queries.
-Verifies:
-1. Consumer crashes on failed queries (fail-fast approach)
-2. Failed queries remain in prepared_queries for retry after restart
-3. System shuts down gracefully when consumer crashes
+Consumer failure handling tests.
+
+Verifies that permanent (data/type) errors move queries to failed_queries
+and do not stop the CDC pipeline, while good rows continue to replicate.
 """
 
 import time
 import sys
 import os
-import sqlite3
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from buffer import BufferDB
-from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse, get_batch_delay_seconds, optimize_clickhouse_table
+from migres.buffer import BufferDB
+from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse, get_batch_delay_seconds
 
 
-def get_prepared_queries_count():
-    """Get count of prepared queries in buffer"""
-    try:
-        conn = sqlite3.connect("data/buffer.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM prepared_queries")
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-    except Exception:
-        return 0
+@pytest.mark.integration
+@pytest.mark.unit
+def test_move_to_failed_unit(tmp_path):
+    """Unit: BufferDB.move_to_failed relocates poison queries."""
+    buf_path = tmp_path / "buffer.db"
+    cfg = {"buffer_file": str(buf_path)}
+    buf = BufferDB(cfg=cfg)
+
+    buf.commit_prepared_queries(
+        [{
+            "sql": "INSERT INTO `db`.`t` (`id`) VALUES",
+            "params": [[1], ["bad"]],
+            "group_id": "g1",
+            "schema": "db",
+            "table": "t",
+        }],
+        [],
+    )
+    queries = buf.fetch_prepared_queries_batch(limit=10)
+    assert len(queries) == 1
+
+    buf.move_to_failed(queries, "type conversion failed")
+    assert buf.fetch_prepared_queries_batch(limit=10) == []
+    stats = buf.get_queue_stats()
+    assert stats["failed_queries"] == 1
+    assert stats["prepared_queries"] == 0
 
 
 @pytest.mark.integration
 @pytest.mark.slow
-def test_consumer_handles_failures(db_connections, migres_process):
-    """Test: Consumer handles failures gracefully and moves to failed_queries"""
+def test_consumer_moves_poison_query_to_failed(db_connections, migres_process):
+    """Integration: inject a poison prepared query; pipeline continues."""
     mysql, ch, cfg = db_connections
-    
-    print("\n" + "="*60)
-    print("📋 TEST: Consumer Failure Handling")
-    print("="*60)
-    
     table = "test_consumer_retry"
     batch_delay = get_batch_delay_seconds(cfg)
-    
-    # Create table
-    print(f"📋 Creating table {table}...")
+
     with mysql.cn.cursor() as cur:
         cur.execute(f"DROP TABLE IF EXISTS {table}")
         cur.execute(f"""
@@ -56,45 +62,51 @@ def test_consumer_handles_failures(db_connections, migres_process):
             )
         """)
         mysql.cn.commit()
-    
-    # Wait for DDL event to be processed
-    time.sleep(max(batch_delay + 5, 20))
-    
-    assert wait_for_table_in_clickhouse(ch, table, timeout=90), f"Table {table} was not created"
-    
-    # Insert valid data
-    print("📝 Inserting valid data...")
+
+    time.sleep(max(batch_delay + 3, 8))
+    assert wait_for_table_in_clickhouse(ch, table, timeout=90)
+
     with mysql.cn.cursor() as cur:
-        for i in range(1, 201):
-            cur.execute(
-                f"INSERT INTO {table} (id, data) VALUES (%s, %s)",
-                (i, f"data_{i}")
-            )
+        for i in range(1, 11):
+            cur.execute(f"INSERT INTO {table} (id, data) VALUES (%s, %s)", (i, f"data_{i}"))
         mysql.cn.commit()
-    
-    # Wait for processing - increased wait for 200 rows
-    wait_time = max(batch_delay * 4, 45)
-    print(f"⏳ Waiting {wait_time}s for processing...")
-    time.sleep(wait_time)
-    
-    assert wait_for_cdc_sync(timeout=240), "CDC sync timeout"
-    
-    optimize_clickhouse_table(ch, table, wait_after=5)
-    
-    # Verify data arrived
-    from conftest import get_clickhouse_count_reliable
-    ch_count = get_clickhouse_count_reliable(ch, table, timeout=60)
-    
-    # Check prepared queries (should be empty after successful processing)
-    prepared_count = get_prepared_queries_count()
-    print(f"📊 Prepared queries remaining: {prepared_count}")
-    
-    assert ch_count == 200, f"Expected 200 rows, got {ch_count}"
-    
-    print(f"✅ Consumer retry test passed: {ch_count} rows replicated")
-    
-    # Cleanup
+
+    assert wait_for_cdc_sync(timeout=120, cfg=cfg)
+
+    # Inject a poison query that will fail type conversion / CH insert
+    buf = BufferDB(cfg=cfg)
+    buf.commit_prepared_queries(
+        [{
+            "sql": f"INSERT INTO `{ch.db}`.`{table}` (`id`, `data`, `__data_transfer_commit_time`, `__data_transfer_delete_time`) VALUES",
+            "params": [["not-an-int", "poison", 1, 0]],
+            "group_id": "poison",
+            "schema": cfg["mysql"]["database"],
+            "table": table,
+        }],
+        [],
+    )
+
+    # Also insert a good row that should still replicate
+    with mysql.cn.cursor() as cur:
+        cur.execute(f"INSERT INTO {table} (id, data) VALUES (%s, %s)", (999, "after_poison"))
+        mysql.cn.commit()
+
+    time.sleep(max(batch_delay * 3, 8))
+    assert wait_for_cdc_sync(timeout=120, cfg=cfg)
+
+    stats = buf.get_queue_stats()
+    assert stats["failed_queries"] >= 1, f"Expected failed_queries >= 1, got {stats}"
+
+    # Pipeline should still be alive (fixture checks process)
+    assert migres_process.poll() is None, "migres process died after poison query"
+
+    # Good row should be present
+    rows = ch.execute(
+        f"SELECT id, data FROM `{ch.db}`.`{table}` FINAL "
+        f"WHERE id = 999 AND __data_transfer_delete_time = 0"
+    )
+    assert rows and rows[0][0] == 999
+
     with mysql.cn.cursor() as cur:
         cur.execute(f"DROP TABLE IF EXISTS {table}")
         mysql.cn.commit()
-

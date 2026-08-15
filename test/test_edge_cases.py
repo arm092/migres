@@ -18,8 +18,8 @@ import pytest
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from buffer import BufferDB
-from notifications import notify_cdc_shutdown
+from migres.buffer import BufferDB
+from migres.notifications import notify_cdc_shutdown
 from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse
 
 
