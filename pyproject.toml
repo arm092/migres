@@ -21,6 +21,7 @@ dependencies = [
   "requests==2.32.5",
   "cryptography>=41.0.0",
   "sqlglot>=25.0.0",
+  "setuptools>=65",
 ]
 
 [project.optional-dependencies]

@@ -25,6 +25,10 @@ Breaking config change plus the 3-stage package rewrite.
 - Per-table consumer workers, sqlglot DDL parsing, SIGTERM graceful shutdown
 - MIT license
 
+### Fixed
+
+- Python 3.12 CI: `mysql-replication==0.46` still imports `distutils`; `setuptools` is now a runtime dependency so `LooseVersion` resolves.
+
 ## 2.1.0
 
 CDC reliability and ops (from `master` before the 3.x rewrite).
