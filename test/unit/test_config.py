@@ -65,13 +65,19 @@ def test_prepared_queries_merge_rows_limit_not_in_defaults(config_path, monkeypa
     assert "prepared_queries_batch_limit" in cdc
 
 
-def test_poll_interval_defaults_from_batch_delay(config_path, monkeypatch):
-    monkeypatch.delenv("CDC_PRODUCER_FLUSH_INTERVAL", raising=False)
+def test_poll_interval_defaults(config_path, monkeypatch):
+    for var in (
+        "CDC_PRODUCER_FLUSH_INTERVAL",
+        "CDC_TRANSFORMER_POLL_INTERVAL",
+        "CDC_CONSUMER_POLL_INTERVAL",
+    ):
+        monkeypatch.delenv(var, raising=False)
     cfg = load_config(config_path)
     cdc = cfg["migration"]["cdc"]
-    # batch_delay default 0 → resolved intervals use fallbacks
-    assert cdc.resolved_producer_flush_interval() == 0.0
-    assert cdc.resolved_transformer_poll_interval() == 0.5
-    assert cdc.resolved_consumer_poll_interval() == 0.1
+    assert cdc.producer_flush_interval == 5.0
+    assert cdc.transformer_poll_interval == 0.5
+    assert cdc.consumer_poll_interval == 0.5
+    # legacy knob is gone entirely
+    assert "batch_delay_seconds" not in cdc
     assert cdc.get("use_gtid") is False
     assert cdc.get("raw_events_max") == 50000

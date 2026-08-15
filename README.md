@@ -83,7 +83,7 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 
 3. **Queue-based event processing**
    - Events are accumulated in a SQLite buffer database as they arrive from binlog
-   - Separate poll/flush intervals: `producer_flush_interval`, `transformer_poll_interval`, `consumer_poll_interval` (legacy `batch_delay_seconds` remains the default for unset knobs)
+   - Separate poll/flush intervals per stage: `producer_flush_interval`, `transformer_poll_interval`, `consumer_poll_interval`
    - Continuous operation: keeps receiving events while processing queue
    - Events for tables not in `include_tables` are automatically filtered to prevent buffer accumulation
 
@@ -201,10 +201,9 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100 # Consumer batch size for execution
-    batch_delay_seconds: 5  # Legacy default for the three intervals below
-    producer_flush_interval: 5
-    transformer_poll_interval: 5
-    consumer_poll_interval: 5
+    producer_flush_interval: 5      # Producer: flush binlog batch to buffer (seconds)
+    transformer_poll_interval: 0.5  # Transformer: poll wait when below checkpoint_interval_rows
+    consumer_poll_interval: 0.5     # Consumer: sleep when queue is empty / batch not full
     raw_events_max: 50000
     use_gtid: false
     batch_max_wait_seconds: 60 # Max wait time for batch processing even if checkpoint_interval_rows is not reached
@@ -447,7 +446,7 @@ Additional integration/reliability tests live under `test/` (batching, crash rec
 [INFO] Starting migres (CDC) mode...
 [INFO] CDC: running initial snapshot before starting binlog streaming...
 [INFO] CDC: initial snapshot completed, starting binlog streaming...
-[INFO] CDC: batch_delay_seconds=5.0, queue-based processing=True
+[INFO] CDC: producer_flush_interval=5.0, queue-based processing=True
 [INFO] CDC: event queued for mydb.users (UpdateRowsEvent) with 1 rows - queue size: 1
 [INFO] CDC: event queued for mydb.users (UpdateRowsEvent) with 1 rows - queue size: 2
 [INFO] CDC: processing queue (time since last process: 5.0s, queue size: 2)
@@ -594,37 +593,43 @@ docker compose up
 - **Workers**: Adjust `workers` based on CPU cores (default: 4)
 - **Checkpoint batching**: Increase `checkpoint_interval_rows` for larger transformer batches (lower latency when reduced)
 - **Low cardinality**: Disable `low_cardinality_strings` if memory is limited
-- **CDC batching**: Adjust `batch_delay_seconds` for optimal performance:
-  - `0` = immediate processing (no batching)
+- **CDC batching**: Adjust `producer_flush_interval` for optimal performance:
+  - `0` = immediate flush (no batching)
   - `5-15` = good balance for most workloads
   - `30+` = for high-volume, less time-sensitive scenarios
 ### CDC Batching Configuration
 
-The `batch_delay_seconds` setting controls how events are processed:
+Each pipeline stage has its own interval (the single `batch_delay_seconds` knob was removed in 3.0.0):
 
-**Immediate Processing (`batch_delay_seconds: 0`):**
+**Immediate Processing:**
 ```yaml
 cdc:
-  batch_delay_seconds: 0  # Each event processed immediately
+  producer_flush_interval: 0      # Flush each event to buffer immediately
+  transformer_poll_interval: 0.2
+  consumer_poll_interval: 0.1
 ```
 - ✅ Lowest latency
 - ❌ More ClickHouse operations
 - ❌ Higher load on ClickHouse
 
-**Batched Processing (`batch_delay_seconds: 5`):**
+**Batched Processing (default):**
 ```yaml
 cdc:
-  batch_delay_seconds: 5  # Events accumulated for 5 seconds
+  producer_flush_interval: 5      # Events accumulated for 5 seconds
+  transformer_poll_interval: 0.5
+  consumer_poll_interval: 0.5
 ```
 - ✅ Reduced ClickHouse load
 - ✅ Better performance for bulk operations
 - ✅ Smart grouping of similar events
-- ⚠️ 5-second delay for data availability
+- ⚠️ ~5-second delay for data availability
 
-**High-Volume Batching (`batch_delay_seconds: 30`):**
+**High-Volume Batching:**
 ```yaml
 cdc:
-  batch_delay_seconds: 30  # Events accumulated for 30 seconds
+  producer_flush_interval: 30     # Events accumulated for 30 seconds
+  transformer_poll_interval: 2
+  consumer_poll_interval: 2
 ```
 - ✅ Maximum ClickHouse efficiency
 - ✅ Best for bulk data processing

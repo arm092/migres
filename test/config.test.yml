@@ -26,7 +26,6 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1
     prepared_queries_batch_limit: 50
-    batch_delay_seconds: 0
     producer_flush_interval: 0
     transformer_poll_interval: 0.2
     consumer_poll_interval: 0.1

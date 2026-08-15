@@ -231,7 +231,7 @@ def run_cdc_pipeline(cfg):
     config_summary = {
         "MySQL": f"{cfg['mysql']['host']}:{cfg['mysql']['port']}/{cfg['mysql']['database']}",
         "ClickHouse": f"{cfg['clickhouse']['host']}:{cfg['clickhouse']['port']}/{cfg['clickhouse']['database']}",
-        "Batch Delay": f"{cfg['migration']['cdc']['batch_delay_seconds']}s",
+        "Flush Interval": f"{cfg['migration']['cdc']['producer_flush_interval']}s",
         "Mode": "CDC",
     }
     notify_cdc_startup(config_summary, "cdc")
@@ -390,7 +390,7 @@ def main():
     config_summary = {
         "MySQL": f"{cfg['mysql']['host']}:{cfg['mysql']['port']}/{cfg['mysql']['database']}",
         "ClickHouse": f"{cfg['clickhouse']['host']}:{cfg['clickhouse']['port']}/{cfg['clickhouse']['database']}",
-        "Batch Delay": f"{cfg['migration']['cdc']['batch_delay_seconds']}s",
+        "Flush Interval": f"{cfg['migration']['cdc']['producer_flush_interval']}s",
         "Mode": mode
     }
 

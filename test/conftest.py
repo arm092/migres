@@ -182,13 +182,14 @@ def clean_test_table(mysql_client, clickhouse_client):
 
 
 def get_batch_delay_seconds(config):
-    return config.get("migration", {}).get("cdc", {}).get("batch_delay_seconds", 15)
+    """Producer flush interval (formerly batch_delay_seconds, removed in 3.0.0)."""
+    return config.get("migration", {}).get("cdc", {}).get("producer_flush_interval", 5)
 
 
 def wait_for_batch_delay(config, multiplier=1.5):
     delay = get_batch_delay_seconds(config)
     wait_time = max(delay * multiplier, 5)
-    print(f"⏳ Waiting {wait_time:.1f}s for batch delay (batch_delay_seconds={delay}s)...")
+    print(f"⏳ Waiting {wait_time:.1f}s for producer flush (producer_flush_interval={delay}s)...")
     time.sleep(wait_time)
 
 

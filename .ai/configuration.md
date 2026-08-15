@@ -49,7 +49,9 @@ Port is the **native protocol** port (9000), not HTTP (8123). Database is auto-c
 | snapshot_before | true | — | run snapshot before starting the pipeline |
 | server_id | 4379 | — | binlog replication server_id base; actual = base + pid % 1000 |
 | heartbeat_seconds | 5 | CDC_HEARTBEAT_SECONDS | binlog slave heartbeat |
-| batch_delay_seconds | 0 | CDC_BATCH_DELAY_SECONDS | producer flush interval; transformer poll interval; consumer sleep when batch not full |
+| producer_flush_interval | 5.0 | CDC_PRODUCER_FLUSH_INTERVAL | producer flush interval (seconds) |
+| transformer_poll_interval | 0.5 | CDC_TRANSFORMER_POLL_INTERVAL | transformer poll wait when below checkpoint_interval_rows |
+| consumer_poll_interval | 0.5 | CDC_CONSUMER_POLL_INTERVAL | consumer sleep when queue empty or batch not full |
 | producer_batch_size | 100 | CDC_PRODUCER_BATCH_SIZE | events per producer flush |
 | checkpoint_interval_rows | 5000 | CDC_CHECKPOINT_INTERVAL_ROWS | transformer waits for this many raw events (0 = process immediately); also the fetch limit |
 | batch_max_wait_seconds | 60 | CDC_BATCH_MAX_WAIT_SECONDS | transformer processes a partial batch after this time |
@@ -77,8 +79,8 @@ Port is the **native protocol** port (9000), not HTTP (8123). Database is auto-c
 
 - `buffer_file` / `BUFFER_FILE` must point to a writable path; there is **no** silent fallback
   to `/tmp/buffer.db` — startup fails if the directory cannot be created/written.
-- `batch_delay_seconds` is reused for three different things (producer flush, transformer poll
-  wait, consumer inter-batch sleep when the last fetch was partial).
+- `batch_delay_seconds` was removed in 3.0.0; each stage now has its own interval knob
+  (`producer_flush_interval`, `transformer_poll_interval`, `consumer_poll_interval`).
 - Do not copy production credentials from `config.yml` into examples, docs, or logs.
 - `heartbeat_seconds` and `server_id` have no defaults in `load_config`; they default inside
   `PipelineProducer` (5 / 4379).

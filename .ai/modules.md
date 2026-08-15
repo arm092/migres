@@ -29,7 +29,7 @@ All modules live in the repository root (flat layout, no package).
   only WriteRows/UpdateRows/DeleteRows/QueryEvent, filtered by `only_schemas`/`only_tables`).
 - `run()`: calls `assert_cdc_binlog_settings()`; fetch loop with reconnect-on-error (backoff,
   max 10 consecutive errors), batching (`producer_batch_size`, flush every
-  `batch_delay_seconds`), transaction-control filtering, CREATE TABLE include-list filtering,
+  `producer_flush_interval`), transaction-control filtering, CREATE TABLE include-list filtering,
   JSON serialization (`_serialize_event`, Decimal→string, bytes→utf8/base64,
   datetime→isoformat), flush to `buffer.insert_raw_events`. On fatal error: notify +
   `sys.exit(1)` (kills the thread; watchdog handles the rest).
@@ -47,8 +47,8 @@ All modules live in the repository root (flat layout, no package).
 - `run()`: waits until `checkpoint_interval_rows` raw events accumulate (or
   `batch_max_wait_seconds` elapse), fetches the batch, processes events in binlog order (flush
   data before inline DDL), groups data events per table preserving per-table order, generates
-  queries, commits atomically via `buffer.commit_prepared_queries`, updates state.json binlog
-  position using `binlog_position_key`. Exceptions are logged and the loop retries after 1s.
+  queries, commits atomically via `buffer.commit_prepared_queries`. Exceptions are logged and
+  the loop retries after 1s. Poll wait: `transformer_poll_interval`.
 
 ## pipeline_consumer.py — stage 3
 - `_convert_for_clickhouse(v, column_type)`: bytes→str; Decimal/date/datetime conversion by CH
@@ -60,8 +60,8 @@ All modules live in the repository root (flat layout, no package).
   prefix, execute; for inserts: deserialize params → type-convert → execute, with a single
   retry (2s) when the error looks like "table doesn't exist". Permanent failures:
   `buffer.move_to_failed()` + Teams notification (no SQL/params in card) + continue. Transient
-  failures: re-raise → thread dies → watchdog exits process. Sleeps `batch_delay_seconds` only
-  when fetch returned fewer rows than the limit.
+  failures: re-raise → thread dies → watchdog exits process. Sleeps `consumer_poll_interval`
+  only when fetch returned fewer rows than the limit.
 
 ## buffer.py — SQLite queue
 - `BufferDB(db_path=None, db_debug, cfg)`: path from `cfg["buffer_file"]` (default

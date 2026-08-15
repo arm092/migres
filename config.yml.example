@@ -39,11 +39,9 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100
-    # Legacy single knob (used as default for the three intervals below when they are unset)
-    batch_delay_seconds: 5
-    producer_flush_interval: 5      # Producer: flush binlog batch to buffer.db
-    transformer_poll_interval: 5    # Transformer: poll wait when below checkpoint_interval_rows
-    consumer_poll_interval: 5       # Consumer: sleep when prepared queue is empty / short batch
+    producer_flush_interval: 5      # Producer: flush binlog batch to buffer.db (seconds)
+    transformer_poll_interval: 0.5  # Transformer: poll wait when below checkpoint_interval_rows
+    consumer_poll_interval: 0.5     # Consumer: sleep when prepared queue is empty / short batch
     batch_max_wait_seconds: 60
     producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
     raw_events_max: 50000           # Backpressure: pause producer when raw_events >= this

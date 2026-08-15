@@ -71,7 +71,7 @@ Handlers registered once; set `_signal_flags` events processed by the main watch
 Reset uses `CHClient.list_migres_tables()` (tables with `__data_transfer_commit_time` only).
 
 ### 🟡 BUG-13: Consumer sleeps after every batch — **FIXED**
-Sleeps `batch_delay_seconds` only when the fetch returned fewer rows than the batch limit.
+Sleeps `consumer_poll_interval` only when the fetch returned fewer rows than the batch limit.
 
 ### 🟡 BUG-14: Notification timestamps mislabeled as UTC — **FIXED**
 Uses `datetime.now(timezone.utc)`.
