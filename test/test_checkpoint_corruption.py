@@ -16,9 +16,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from buffer import BufferDB
+from migres.buffer import BufferDB
 from conftest import wait_for_cdc_sync, wait_for_table_in_clickhouse, get_batch_delay_seconds, optimize_clickhouse_table
-from notifications import notify_cdc_shutdown
+from migres.notifications import notify_cdc_shutdown
 
 
 def start_migres():

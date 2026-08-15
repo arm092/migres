@@ -1,0 +1,47 @@
+services:
+  mysql-test:
+    image: mysql:8.0
+    container_name: migres-mysql-test
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: migres_src
+      MYSQL_USER: migres
+      MYSQL_PASSWORD: migrespass
+    ports:
+      - "3307:3306"
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --default-authentication-plugin=mysql_native_password
+      - --binlog-expire-logs-seconds=86400
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  clickhouse-test:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: migres-ch-test
+    environment:
+      CLICKHOUSE_DB: migres_dst
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "9001:9000"
+      - "8124:8123"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s

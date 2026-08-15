@@ -1,6 +1,7 @@
 import mysql.connector
 import logging
 import threading
+from migres.schema.ddl import quote_ident
 
 log = logging.getLogger(__name__)
 
@@ -15,14 +16,12 @@ class MySQLClient:
         self.cn = None
         self._config_key = (cfg["host"], cfg.get("port", 3306), cfg["user"], cfg["database"])
         
-        # Check if this config has logged connection before (across all threads)
         with self._log_lock:
             self._should_log_connection = self._config_key not in self._connection_logged
             if self._should_log_connection:
                 self._connection_logged.add(self._config_key)
 
     def connect(self):
-        # Close existing connection if any (avoid connection leaks)
         if self.cn:
             try:
                 self.cn.close()
@@ -30,12 +29,11 @@ class MySQLClient:
                 pass
             self.cn = None
         
-        # Only log connection once per unique config (across all threads)
         if self._should_log_connection:
             log.info("MySQL connected: %s:%s/%s", self.cfg["host"], self.cfg.get("port", 3306), self.cfg["database"])
-            self._should_log_connection = False  # Don't log again for this instance
+            self._should_log_connection = False
         
-        self.cn = mysql.connector.connect(
+        connect_kwargs = dict(
             host=self.cfg["host"],
             port=self.cfg.get("port", 3306),
             user=self.cfg["user"],
@@ -45,6 +43,14 @@ class MySQLClient:
             use_unicode=True,
             autocommit=False,
         )
+        # Optional TLS
+        if self.cfg.get("ssl_disabled"):
+            connect_kwargs["ssl_disabled"] = True
+        elif self.cfg.get("ssl_ca"):
+            connect_kwargs["ssl_ca"] = self.cfg["ssl_ca"]
+            connect_kwargs["ssl_verify_cert"] = True
+
+        self.cn = mysql.connector.connect(**connect_kwargs)
         return self.cn
 
     def close(self):
@@ -54,7 +60,7 @@ class MySQLClient:
             except mysql.connector.Error:
                 pass
             finally:
-                self.cn = None  # Ensure reference is cleared
+                self.cn = None
 
     def get_mysql_version(self):
         """Get MySQL version for compatibility checks"""
@@ -66,20 +72,17 @@ class MySQLClient:
             
             log.debug("MySQL version: %s", version_str)
             
-            # Parse version string (e.g., "8.4.0" or "8.0.35")
             try:
                 version_parts = version_str.split('.')
                 major = int(version_parts[0])
                 minor = int(version_parts[1])
                 return major, minor
             except (ValueError, IndexError):
-                # Fallback to assuming older version
                 log.warning("Could not parse MySQL version '%s', assuming 8.0", version_str)
                 return 8, 0
         except mysql.connector.Error as e:
             log.warning("Failed to get MySQL version: %s", e)
             cur.close()
-            # Fallback to assuming older version
             return 8, 0
 
     def show_master_status(self):
@@ -87,15 +90,12 @@ class MySQLClient:
         cur = self.cn.cursor()
         
         try:
-            # Check MySQL version to use appropriate command
             major, minor = self.get_mysql_version()
             
             if major >= 8 and minor >= 4:
-                # MySQL 8.4+ uses SHOW BINARY LOG STATUS
                 cur.execute("SHOW BINARY LOG STATUS")
                 log.debug("Using SHOW BINARY LOG STATUS for MySQL %d.%d", major, minor)
             else:
-                # MySQL 8.0 and earlier use SHOW MASTER STATUS
                 cur.execute("SHOW MASTER STATUS")
                 log.debug("Using SHOW MASTER STATUS for MySQL %d.%d", major, minor)
             
@@ -105,13 +105,42 @@ class MySQLClient:
             if not row:
                 return None
             
-            # Both commands return the same format: (file, position, ...)
             return row[0], int(row[1])
             
         except mysql.connector.Error as e:
             log.warning("Failed to get binary log status: %s", e)
             cur.close()
             return None
+
+    def get_binlog_settings(self):
+        """Return dict of binlog_format, binlog_row_image, binlog_row_metadata."""
+        cur = self.cn.cursor()
+        try:
+            cur.execute(
+                "SHOW VARIABLES WHERE Variable_name IN "
+                "('binlog_format', 'binlog_row_image', 'binlog_row_metadata')"
+            )
+            rows = {r[0].lower(): (r[1] or "").upper() for r in cur.fetchall()}
+            cur.close()
+            return rows
+        except mysql.connector.Error as e:
+            cur.close()
+            raise RuntimeError(f"Failed to read binlog settings: {e}") from e
+
+    def assert_cdc_binlog_settings(self):
+        """Raise RuntimeError if binlog settings are unsuitable for CDC."""
+        settings = self.get_binlog_settings()
+        fmt = settings.get("binlog_format", "")
+        image = settings.get("binlog_row_image", "")
+        errors = []
+        if fmt != "ROW":
+            errors.append(f"binlog_format={fmt!r} (required: ROW)")
+        if image != "FULL":
+            errors.append(f"binlog_row_image={image!r} (required: FULL)")
+        if errors:
+            raise RuntimeError(
+                "MySQL binlog settings are not suitable for CDC: " + "; ".join(errors)
+            )
 
     def start_repeatable_snapshot(self):
         try:
@@ -134,7 +163,6 @@ class MySQLClient:
         if include_list:
             res = []
             for t in include_list:
-                # Use parameterized queries - handles reserved keywords correctly
                 cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=%s AND table_name=%s",
                             (self.cfg["database"], t))
                 if cur.fetchone()[0] > 0:
@@ -149,7 +177,6 @@ class MySQLClient:
             rows = [r[0] for r in cur.fetchall()]
             cur.close()
             filtered = [t for t in rows if t not in exclude_list]
-            # warn about excluded tables not present? no need.
             return filtered
 
     def get_table_columns_and_pk(self, table):
@@ -158,18 +185,12 @@ class MySQLClient:
         log.info("MySQL: Getting schema for table '%s' in database '%s'", table, self.cfg["database"])
         
         try:
-            # Track MySQL queries
-            from cdc import _add_mysql_query
-            
-            # Use parameterized queries - this handles reserved keywords correctly
-            # MySQL automatically treats the parameterized values as strings, not identifiers
             query1 = """
-                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
+                SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, COLUMN_DEFAULT
                 FROM INFORMATION_SCHEMA.COLUMNS
                 WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s
                 ORDER BY ORDINAL_POSITION
             """
-            _add_mysql_query(f"Query: {query1.strip()} | Params: ('{self.cfg['database']}', '{table}')", table)
             cur.execute(query1, (self.cfg["database"], table))
             cols = cur.fetchall()
             log.info("MySQL: Found %d columns for table '%s': %s", len(cols), table, [c["COLUMN_NAME"] for c in cols])
@@ -180,7 +201,6 @@ class MySQLClient:
                 WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND CONSTRAINT_NAME='PRIMARY'
                 ORDER BY ORDINAL_POSITION
             """
-            _add_mysql_query(f"Query: {query2.strip()} | Params: ('{self.cfg['database']}', '{table}')", table)
             cur.execute(query2, (self.cfg["database"], table))
             pk_rows = cur.fetchall()
             pk = [r["COLUMN_NAME"] for r in pk_rows] if pk_rows else []
@@ -196,21 +216,31 @@ class MySQLClient:
 
     def fetch_rows_by_pk(self, table, columns, pk_col, last_pk, batch):
         cur = self.cn.cursor()
-        cols_sql = ", ".join([f"`{c}`" for c in columns])
+        cols_sql = ", ".join([quote_ident(c) for c in columns])
+        qdb = quote_ident(self.cfg["database"])
+        qtable = quote_ident(table)
+        qpk = quote_ident(pk_col)
         if last_pk is None:
-            sql = f"SELECT {cols_sql} FROM `{self.cfg['database']}`.`{table}` ORDER BY `{pk_col}` ASC LIMIT %s"
+            sql = f"SELECT {cols_sql} FROM {qdb}.{qtable} ORDER BY {qpk} ASC LIMIT %s"
             cur.execute(sql, (batch,))
         else:
-            sql = f"SELECT {cols_sql} FROM `{self.cfg['database']}`.`{table}` WHERE `{pk_col}` > %s ORDER BY `{pk_col}` ASC LIMIT %s"
+            sql = f"SELECT {cols_sql} FROM {qdb}.{qtable} WHERE {qpk} > %s ORDER BY {qpk} ASC LIMIT %s"
             cur.execute(sql, (last_pk, batch))
         rows = cur.fetchall()
         cur.close()
         return rows
 
-    def fetch_stream_with_offset(self, table, columns, offset, batch):
+    def fetch_stream_with_offset(self, table, columns, offset, batch, order_columns=None):
+        """Fetch a page of rows with deterministic ORDER BY (required for OFFSET safety)."""
         cur = self.cn.cursor()
-        cols_sql = ", ".join([f"`{c}`" for c in columns])
-        sql = f"SELECT {cols_sql} FROM `{self.cfg['database']}`.`{table}` LIMIT %s OFFSET %s"
+        cols_sql = ", ".join([quote_ident(c) for c in columns])
+        qdb = quote_ident(self.cfg["database"])
+        qtable = quote_ident(table)
+        order_cols = order_columns or columns
+        if not order_cols:
+            raise ValueError(f"Cannot paginate table {table} without ORDER BY columns")
+        order_sql = ", ".join([quote_ident(c) for c in order_cols])
+        sql = f"SELECT {cols_sql} FROM {qdb}.{qtable} ORDER BY {order_sql} LIMIT %s OFFSET %s"
         cur.execute(sql, (batch, offset))
         rows = cur.fetchall()
         cur.close()

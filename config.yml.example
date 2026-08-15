@@ -10,6 +10,9 @@ mysql:
     "transactions",
   ]  # empty = all
   exclude_tables: []
+  # Optional TLS:
+  # ssl_ca: /path/to/ca.pem
+  # ssl_disabled: false
 
 clickhouse:
   host: 127.0.0.1
@@ -17,6 +20,10 @@ clickhouse:
   user: chuser
   password: "root"
   database: target_db
+  # Optional TLS:
+  # secure: true
+  # verify: true
+  # ca_certs: /path/to/ca.pem
 
 migration:
   # Debug mode (true/false) - enables verbose logging for CDC events
@@ -32,15 +39,23 @@ migration:
     heartbeat_seconds: 5
     checkpoint_interval_rows: 1000  # Transformer waits until this many raw events (0 = disable waiting)
     prepared_queries_batch_limit: 100
-    prepared_queries_merge_rows_limit: 5000  # Merge consecutive queries (0 = disable)
-    batch_delay_seconds: 5  # Delay in seconds before processing accumulated events (0 = immediate processing)
+    producer_flush_interval: 5      # Producer: flush binlog batch to buffer.db (seconds)
+    transformer_poll_interval: 0.5  # Transformer: poll wait when below checkpoint_interval_rows
+    consumer_poll_interval: 0.5     # Consumer: sleep when prepared queue is empty / short batch
+    batch_max_wait_seconds: 60
+    producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
+    raw_events_max: 50000           # Backpressure: pause producer when raw_events >= this
+    raw_events_resume_ratio: 0.8    # Resume when raw_events <= max * ratio
+    use_gtid: false                 # When true, position via GTID (auto_position) instead of file:pos
     snapshot_before: true  # Run snapshot before CDC
     server_id: 4379  # Unique ID for binlog replication
-    force_binlog_position_use_state: false  # If true, always use state.json binlog position (ignores buffer DB position)
-    db_debug: false  # If true, move processed events/queries to processed tables instead of deleting them
+    force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)
+    db_debug: false  # If true, archive processed events/queries to ClickHouse debug tables
 
 # Where migres persists its resumable state
 state_file: /app/data/state.json
+# SQLite buffer path (must be writable)
+buffer_file: /app/data/buffer.db
 
 # Can be overridden with ENVIRONMENT environment variable
 # Default: prod

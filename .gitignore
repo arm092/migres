@@ -4,3 +4,11 @@ config.yml
 .idea
 __pycache__
 test/__pycache__
+test/.tmp
+*.pyc
+.pytest_cache
+.coverage
+htmlcov
+*.egg-info
+dist
+build
