@@ -56,7 +56,7 @@ Port is the **native protocol** port (9000), not HTTP (8123). Database is auto-c
 | checkpoint_interval_rows | 5000 | CDC_CHECKPOINT_INTERVAL_ROWS | transformer waits for this many raw events (0 = process immediately); also the fetch limit |
 | batch_max_wait_seconds | 60 | CDC_BATCH_MAX_WAIT_SECONDS | transformer processes a partial batch after this time |
 | prepared_queries_batch_limit | 100 | CDC_PREPARED_QUERIES_BATCH_LIMIT | consumer fetch limit |
-| force_binlog_position | null | CDC_FORCE_BINLOG_POSITION | "file:pos"; used only by the SIGUSR2 reposition handler |
+| force_binlog_position | null | CDC_FORCE_BINLOG_POSITION | "file:pos"; loaded at process start; used only by SIGUSR2 (not on normal producer start) |
 | db_debug | false | CDC_DB_DEBUG | archive consumed buffer rows to ClickHouse debug tables |
 
 ## notifications
@@ -64,8 +64,15 @@ Port is the **native protocol** port (9000), not HTTP (8123). Database is auto-c
 | Key | Default | Env |
 |-----|---------|-----|
 | enabled | false | NOTIFICATIONS_ENABLED |
-| webhook_url | — | NOTIFICATIONS_WEBHOOK_URL |
 | rate_limit_seconds | 60 | NOTIFICATIONS_RATE_LIMIT_SECONDS |
+| webhook_url | — | NOTIFICATIONS_WEBHOOK_URL (Teams alias) |
+| teams.enabled | true | — |
+| teams.webhook_url | — | NOTIFICATIONS_TEAMS_WEBHOOK_URL |
+| slack.enabled | true | — |
+| slack.webhook_url | — | NOTIFICATIONS_SLACK_WEBHOOK_URL |
+| telegram.enabled | true | — |
+| telegram.bot_token | — | NOTIFICATIONS_TELEGRAM_BOT_TOKEN |
+| telegram.chat_id | — | NOTIFICATIONS_TELEGRAM_CHAT_ID |
 
 ## top-level
 

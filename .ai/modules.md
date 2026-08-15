@@ -107,10 +107,12 @@ All modules live in the repository root (flat layout, no package).
   threading.Lock, and read-modify-write on every access (no in-memory cache).
 - Shape: `{"binlog": {"file", "pos"} | null, "tables": {name: {status, last_pk, rows_processed}}}`.
 
-## notifications.py
-- `TeamsNotification`: adaptive-card sender with per-type rate limiting; UTC timestamps.
+## notifications/
+- `NotificationDispatcher`: shared per-type rate limit, then fan-out to Teams / Slack / Telegram.
+- One failed provider does not block the others; `notify_*` is true if any channel sent.
 - Module-level singleton: `initialize_notifications(config, environment)` +
   `notify_cdc_*` convenience functions (no-ops when handler is None/disabled).
+- Flat `webhook_url` is a Teams alias for existing configs.
 
 ## logger.py
 - `setup_logging()`: idempotent root-logger setup, single stdout StreamHandler, INFO level.

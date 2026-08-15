@@ -127,7 +127,8 @@ watchdog loop in `run_cdc_pipeline()` performs the actual work (avoids re-entran
 
 ## Notifications
 
-`notifications.py` sends MS Teams adaptive cards (startup, shutdown, errors, warnings, info)
+`migres.notifications` fans out startup/shutdown/error/warning/info to Teams (Adaptive Card),
+Slack (Block Kit), and Telegram (HTML) in parallel; one failed channel does not block the others.
 through a global singleton handler initialized in `main()`. Rate limiting is per notification
 type (`rate_limit_seconds`). Card color encodes the environment (dev=green, stage=yellow,
 prod=red). Title suffix `[ENVIRONMENT]`.

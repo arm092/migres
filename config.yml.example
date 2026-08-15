@@ -49,7 +49,7 @@ migration:
     use_gtid: false                 # When true, position via GTID (auto_position) instead of file:pos
     snapshot_before: true  # Run snapshot before CDC
     server_id: 4379  # Unique ID for binlog replication
-    force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)
+    force_binlog_position: null  # "file:pos" for SIGUSR2 only — not used on normal start
     db_debug: false  # If true, archive processed events/queries to ClickHouse debug tables
 
 # Where migres persists its resumable state
@@ -61,9 +61,19 @@ buffer_file: /app/data/buffer.db
 # Default: prod
 environment: dev
 
-# MS Teams Notifications
+# Notifications (Teams / Slack / Telegram — any combination)
 notifications:
   enabled: true
-  webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
-  rate_limit_seconds: 60  # Minimum seconds between notifications (0 = no limit)
-  # Rate limiting is per notification type (cdc_error, cdc_warning, cdc_info, etc.)
+  rate_limit_seconds: 60  # per notification type; 0 = no limit
+  teams:
+    enabled: true
+    webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
+  slack:
+    enabled: true
+    webhook_url: "https://hooks.slack.com/services/T00/B00/XXX"
+  telegram:
+    enabled: true
+    bot_token: "123456:ABC..."
+    chat_id: "-1001234567890"
+  # Legacy alias: top-level webhook_url is treated as teams.webhook_url
+  # webhook_url: "https://....webhook.office.com/..."

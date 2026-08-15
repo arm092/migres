@@ -27,7 +27,7 @@ It has two modes:
   as inserts of new row versions (upsert / soft-delete semantics), deduplicated on merge
 - Persistent local state: `data/state.json` (binlog position + per-table snapshot progress)
   and `data/buffer.db` (SQLite queue between pipeline stages)
-- Notifications: MS Teams webhook (adaptive cards), configured under `notifications:` in config
+- Notifications: Teams / Slack / Telegram (parallel), configured under `notifications:` in config
 - Tests: `test/` folder (pytest); `test_cdc.py` and `test_sales_savepoint.py` also exist at repo root
 - Legacy: `cdc.py` used to contain the single-threaded CDC loop; now it only holds
   `CriticalCDCError`, query-tracking pools, and `_map_with_low_cardinality` used by other modules

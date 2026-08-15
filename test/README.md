@@ -5,7 +5,7 @@ This directory contains test scripts for the CDC (Change Data Capture) batching 
 ## Test Files
 
 - **`test_cdc_batching.py`** - Main CDC batching test with 5000 INSERT/UPDATE/DELETE operations
-- **`test_notifications.py`** - MS Teams notification system test
+- **`test_notifications.py`** - Live Teams/Slack/Telegram test (opt-in; skips without credentials)
 - **`test_data_integrity.py`** - Data integrity test with checksum verification
 - **`test_crash_recovery.py`** - Crash recovery scenarios test
 - **`test_network_failure.py`** - Network failure and reconnection test
@@ -70,10 +70,9 @@ python monitor_cdc.py
 
 ### Notifications Test (test_notifications.py)
 - ✅ Reads notification configuration from config.yml
-- ✅ Tests MS Teams webhook connectivity
+- ✅ Skips unless at least one live provider is configured (Teams / Slack / Telegram)
 - ✅ Sends test notifications (Error, Warning, Info)
-- ✅ Verifies notifications appear in MS Teams channel
-- ✅ Tests rate limiting functionality
+- ✅ Tests shared rate limiting (one cooldown for all channels)
 
 ## Error Dump Files
 

@@ -56,15 +56,23 @@ CDC_RAW_EVENTS_MAX=50000
 ```
 **Notes:**
 - `CDC_BATCH_DELAY_SECONDS` was **removed in 3.0.0**. Use `CDC_PRODUCER_FLUSH_INTERVAL`, `CDC_TRANSFORMER_POLL_INTERVAL`, and `CDC_CONSUMER_POLL_INTERVAL`. The old variable is ignored with a warning.
-- `CDC_FORCE_BINLOG_POSITION` - Optional binlog position in "file:position" format (e.g., "mysql-bin.000123:6855245"). Used by SIGUSR2 reposition handler to set a specific binlog position. If not set, SIGUSR2 signal is ignored. Default is not set (null).
+- `CDC_FORCE_BINLOG_POSITION` - Optional binlog position in "file:position" format (e.g., "mysql-bin.000123:6855245"). Loaded at process start; used only when SIGUSR2 is received (deletes `buffer.db`, writes the position into `state.json`, restarts pipeline threads). Changing the env while the process is running has no effect until you restart the process, then send SIGUSR2. If not set, SIGUSR2 is ignored. Default is not set (null).
 - `CDC_DB_DEBUG` - If set to `true`, processed events and queries are archived to ClickHouse debug tables instead of being deleted. Useful for debugging and auditing. Default is `false`.
 
 ### Notifications Configuration
 ```bash
 NOTIFICATIONS_ENABLED=true
-NOTIFICATIONS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/your-webhook-url
 NOTIFICATIONS_RATE_LIMIT_SECONDS=60
+# Teams (NOTIFICATIONS_WEBHOOK_URL is a legacy alias for the Teams webhook)
+NOTIFICATIONS_TEAMS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/your-webhook-url
+NOTIFICATIONS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/your-webhook-url
+# Slack incoming webhook
+NOTIFICATIONS_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T00/B00/XXX
+# Telegram Bot API
+NOTIFICATIONS_TELEGRAM_BOT_TOKEN=123456:ABC
+NOTIFICATIONS_TELEGRAM_CHAT_ID=-1001234567890
 ```
+Any subset of providers can be enabled at once; one failed channel does not block the others.
 
 ### File Paths
 ```bash

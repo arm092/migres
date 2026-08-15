@@ -5,7 +5,7 @@ Severity: 🔴 critical · 🟠 major · 🟡 minor. Line numbers in historical 
 ## Open issues
 
 ### 🔴 SEC-1: Real credentials in the working tree
-`config.yml` contains live MySQL/ClickHouse passwords and may contain real MS Teams webhook URLs.
+`config.yml` contains live MySQL/ClickHouse passwords and may contain real Teams/Slack webhooks or a Telegram bot token.
 The file is gitignored, but secrets exist on disk and in any backups/shares. **Fix:** move secrets
 to env vars (already supported), rotate any exposed passwords and webhooks. Do not copy production
 `config.yml` into docs or examples.
