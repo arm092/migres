@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.1.0
+
+### Added
+
+- Multi-channel notifications: MS Teams, Slack, and Telegram can run in parallel.
+  Nested config (`notifications.teams` / `.slack` / `.telegram`). Flat
+  `notifications.webhook_url` is still accepted as a Teams alias.
+- Env: `NOTIFICATIONS_TEAMS_WEBHOOK_URL`, `NOTIFICATIONS_SLACK_WEBHOOK_URL`,
+  `NOTIFICATIONS_TELEGRAM_BOT_TOKEN`, `NOTIFICATIONS_TELEGRAM_CHAT_ID`.
+  `NOTIFICATIONS_WEBHOOK_URL` remains the Teams alias.
+
 ## 3.0.0
 
 Breaking config change plus the 3-stage package rewrite.

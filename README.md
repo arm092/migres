@@ -44,12 +44,12 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 - 🛑 **Backpressure** when `raw_events` grows past `raw_events_max`
 - 🌍 **Timezone-aware datetime handling** (DateTime64 with timezone)
 - 🛡️ **Robust error handling** — permanent data/type errors move queries to `failed_queries`; transient network errors crash the consumer for orchestrator restart/retry
-- 📱 **MS Teams notifications** for errors, warnings, and important events
+- 📱 **Notifications** to MS Teams, Slack, and Telegram (any combination in parallel)
 
 ### Operations
 - 📑 **Detailed logging** (visible via `docker compose logs -f`)
 - 🐳 **Docker support** with hot-reload for development
-- 📢 **Real-time notifications** to MS Teams channels
+- 📢 **Real-time notifications** to Teams / Slack / Telegram
 
 ---
 
@@ -121,7 +121,8 @@ It supports both **snapshot mode** (initial data migration) and **CDC mode** (re
 
 8. **Checkpoint persistence**
    - Producer writes the last committed binlog position to the `checkpoint` table in `buffer.db` (atomically with each flush)
-   - On restart the producer resumes from: `checkpoint` → `force_binlog_position` → `state.json` → current master
+   - On process start the producer resumes from: `checkpoint` → last `raw_events` row → `state.json` → current master
+   - `force_binlog_position` is **not** used on start; it is only consumed by SIGUSR2 (see below)
    - `state.json` is the snapshot baseline and a **manual override** (reset / SIGUSR2), not the live CDC cursor
    - Set `db_debug: true` to archive processed events/queries in `raw_events_processed` and `prepared_queries_processed` tables for debugging
 
@@ -232,15 +233,24 @@ migration:
     use_gtid: false                 # When true, position via GTID instead of file:pos
     batch_max_wait_seconds: 60 # Max wait time for batch processing even if checkpoint_interval_rows is not reached
     producer_batch_size: 100  # Number of events producer accumulates before flushing to buffer
-    force_binlog_position: null  # Optional: "mysql-bin.000123:6855245" format to force specific binlog position (used by SIGUSR2 handler)
+    force_binlog_position: null  # "file:pos" for SIGUSR2 only — not used on normal start
     db_debug: false  # If true, move processed events/queries to processed tables instead of deleting them
     server_id: 4379  # Unique ID for binlog replication
 
-# MS Teams Notifications
+# Notifications (any combination of Teams / Slack / Telegram)
 notifications:
   enabled: true
-  webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
-  rate_limit_seconds: 60  # Minimum seconds between notifications (0 = no limit)
+  rate_limit_seconds: 60  # per type; 0 = no limit
+  teams:
+    enabled: true
+    webhook_url: "https://your-org.webhook.office.com/webhookb2/your-webhook-url"
+  slack:
+    enabled: true
+    webhook_url: "https://hooks.slack.com/services/T00/B00/XXX"
+  telegram:
+    enabled: true
+    bot_token: "123456:ABC..."
+    chat_id: "-1001234567890"
 
 # Local persistence paths (must be writable)
 state_file: /app/data/state.json
@@ -325,7 +335,15 @@ kill -USR1 <process_id>
 
 ### Reposition Feature (SIGUSR2)
 
-The application supports a **reposition mechanism** that allows you to change the binlog position without a full reset: gracefully shutdown all pipeline threads, delete buffer.db, update state.json with a new binlog position from config, and restart all threads. This is useful for repositioning the CDC stream to a specific binlog position.
+The application supports a **reposition mechanism** that allows you to change the binlog position without a full reset: gracefully shutdown all pipeline threads, delete buffer.db, update state.json with a new binlog position from config, and restart all threads.
+
+Config and environment variables are loaded **once at process start**. Changing `CDC_FORCE_BINLOG_POSITION` (or `config.yml`) while the process is running does nothing until you restart the process. After that restart CDC still resumes from the `buffer.db` checkpoint — the new value is only applied when you then send SIGUSR2.
+
+**Typical flow (env or config change):**
+1. Set `CDC_FORCE_BINLOG_POSITION=mysql-bin.000123:6855245` (or the same in `config.yml`)
+2. Restart the process / pod so the new value is loaded
+3. Send SIGUSR2 — threads stop, `buffer.db` is deleted, `state.json` is written, threads start again from that position
+4. The process itself does **not** exit; only the pipeline threads restart
 
 **How it works:**
 - Requires `force_binlog_position` config to be set (format: "file:position", e.g., "mysql-bin.000123:6855245")
@@ -423,6 +441,9 @@ export CLICKHOUSE_SECURE=true
 # Notifications
 export NOTIFICATIONS_ENABLED=true
 export NOTIFICATIONS_WEBHOOK_URL=https://your-webhook-url
+export NOTIFICATIONS_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T00/B00/XXX
+export NOTIFICATIONS_TELEGRAM_BOT_TOKEN=123456:ABC
+export NOTIFICATIONS_TELEGRAM_CHAT_ID=-1001234567890
 
 # Environment name (used in notification titles)
 export ENVIRONMENT=prod
@@ -492,7 +513,7 @@ Additional integration/reliability tests live under `test/` (batching, crash rec
 [INFO] CDC: dropped table old_table in ClickHouse
 ```
 
-**MS Teams Notifications:**
+**Notifications (Teams / Slack / Telegram):**
 ```
 🚀 CDC Process Started
 CDC (Change Data Capture) process has started successfully
